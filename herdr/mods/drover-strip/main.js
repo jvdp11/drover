@@ -4,7 +4,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, terminals, shared, theme, openOverlay, home, exec, nextCommand, run, panes } from "herdr";
+import { spaces, terminals, shared, setShared, theme, openOverlay, home, exec, nextCommand, run, panes } from "herdr";
 // Show an agent's terminal: focus its pane (switching space/tab first); with no pane, peek it.
 function showTerminal(terminal) {
   const pane = panes().find((p) => p.terminal === terminal);
@@ -16,6 +16,18 @@ function showTerminal(terminal) {
   run("pane.focus", { terminal });
 }
 
+// The project's pasture as its own tab: one per space, found again by its name (only that tab is ever selected).
+// A reused tab gets the asked-for mission through shared "drover.pasture.pick".
+function openPasture(s, folder, name, extra = {}) {
+  const tab = s.tabs?.find((tb) => tb.name === "pasture" && tb.named);
+  if (tab) {
+    if (!s.active) run("space.select", { id: s.id });
+    if (!tab.active) run("tab.select", { id: tab.id });
+    if (extra.mission || extra.showArchived) setShared("drover.pasture.pick", { folder, ...extra, at: Date.now() });
+    return;
+  }
+  run("tab.new", { name: "pasture", space: s.id, mod: "drover-dashboard", props: { space: s.id, folder, name, ...extra } });
+}
 
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const pad = (n) => String(n).padStart(2, "0");
@@ -35,10 +47,11 @@ export default class Strip extends View {
     });
   }
 
+  // ctrl-shift-d: the quick look, a dialog almost as big as the window.
   dashboard(s) {
     if (!s?.folder || s.folder === home() || s.machine) return;
     // Herdr exposes no live overlay list; remembering an id would go stale after Esc.
-    openOverlay({ mod: "drover-dashboard", kind: "dialog", width: 1120, height: 760,
+    openOverlay({ mod: "drover-dashboard", kind: "dialog", width: 0.95, height: 0.95,
       props: { space: s.id, folder: s.folder, name: s.name } });
   }
 
@@ -116,8 +129,8 @@ export default class Strip extends View {
           .child(div().font_semibold().child("Mission")),
           h_flex().id("dashboard").gap(5).items_center().px(8).py(2).rounded(6)
             .cursor_pointer().bg(`${t.accent}14`).text_color(t.accent).hover((st) => st.bg(`${t.accent}33`))
-            .tooltip(`Open mission dashboard${needsYou ? ` · ${needsYou} need you` : ""} · Esc to close`)
-            .on_click(() => this.dashboard(s))
+            .tooltip(`Open the mission dashboard tab${needsYou ? ` · ${needsYou} need you` : ""} · ctrl-shift-d for a quick look`)
+            .on_click(() => openPasture(s, s.folder, s.name))
             .child(svg("mods/drover-rail/horns.svg").size(12).text_color(t.accent)
               .when(this.running.has(s.folder), (el) => el.loop("opacity", { from: 0.45, to: 1, period: 1600 })))
             .child(div().font_semibold().child("Dashboard"))

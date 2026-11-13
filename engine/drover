@@ -8,6 +8,7 @@ other machine is reached with `hc exec --on` / `hc run --on`.
   drover probe                               ask every machine what it can do now
   drover status                              machines + drover agents, for the panel
   drover dashboard [--repo PATH] [--mission ID]   project mission dashboard
+  drover dashboard --window [--repo PATH] [--mission ID]   ... in its own window
   drover route ROLE [--repo PATH]            where and with what ROLE would start
   drover run ROLE --repo PATH TASK           start it there (hc run --bg)
   drover cleanup [--repo PATH] [--yes]       remove merged drover/* branches and worktrees
@@ -2032,8 +2033,82 @@ def cmd_peek(a, cfg):
          a.json, lambda d: "\n".join(d["lines"]))
 
 
+PASTURE_APPS = os.path.join(STATE_DIR, "pasture-app")
+
+
+def pasture_layout(repo, name, mission):
+    """A whole Herdr window that is only the pasture: a slim drag strip over the dashboard."""
+    props = {"folder": repo, "name": name, "popout": True, **({"mission": mission} if mission else {})}
+    return {"id": "root", "type": "column", "titlebar": "none", "theme": "omarchy",
+            "font": "JetBrainsMono Nerd Font", "font_size": 14, "ui_font": "JetBrainsMono Nerd Font",
+            "background": "canvas", "padding": 6, "gap": 0, "children": [
+                {"id": "titlebar", "type": "block", "size": {"px": 14}, "resizable": False, "window_drag": True,
+                 "content": {"mod": "drover-titlebar"}},
+                {"id": "pasture", "type": "block", "radius": 10, "background": "background",
+                 "content": {"mod": "drover-dashboard", "props": props}}]}
+
+
+def pasture_window(repo, mission):
+    """Open (or bring forward) the project's pasture in its own Herdr window: its own HERDR_APP_HOME."""
+    if not shutil.which("herdr-app"):
+        die("herdr-app is not installed")
+    name = os.path.basename(repo.rstrip(os.sep)) or "project"
+    home = os.path.join(PASTURE_APPS, f"{slug(name)}-{hashlib.sha1(repo.encode()).hexdigest()[:6]}")
+    for d in ("mods", "layouts", "themes"):
+        os.makedirs(os.path.join(home, d), exist_ok=True)
+
+    def link(target, path):
+        if os.path.islink(path) and os.readlink(path) == target:
+            return
+        if os.path.lexists(path):
+            if not os.path.islink(path):
+                return  # never replace a real file someone put there
+            os.unlink(path)
+        os.symlink(target, path)
+
+    mods = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "herdr", "mods")
+    for m in sorted(os.listdir(mods)) if os.path.isdir(mods) else []:
+        if m.startswith("drover-"):
+            link(os.path.join(mods, m), os.path.join(home, "mods", m))
+    for theme in (os.path.join(HOME, ".local", "state", "omarchy", "current", "theme", "herdr-app.json"),
+                  os.path.join(HOME, ".config", "herdr-app", "themes", "omarchy.json")):
+        if os.path.isfile(theme):
+            link(os.path.realpath(theme), os.path.join(home, "themes", "omarchy.json"))
+            break
+    # Herdr redraws from layout files live, so a running window picks up a new mission too.
+    write_json(os.path.join(home, "layouts", "pasture.json"), pasture_layout(repo, name, mission))
+    env = {**os.environ, "HERDR_APP_HOME": home}
+    running = subprocess.run(["herdr-app", "status"], env=env, capture_output=True, timeout=10).returncode == 0
+    if not running:  # Herdr owns these files while it runs
+        # Show the pasture layout, and skip Herdr's first-run welcome: this window is not a new install.
+        try:
+            with open(os.path.join(home, "shared.json")) as f:
+                shared = json.load(f)
+        except (OSError, ValueError):
+            shared = {}
+        seed = {"layout": "pasture", "frame.welcomed": "skipped", "workspace.panels": []}
+        if not isinstance(shared, dict):
+            shared = {}
+        if any(k not in shared for k in seed) or shared.get("layout") != "pasture":
+            write_json(os.path.join(home, "shared.json"), {**shared, **{k: v for k, v in seed.items() if k not in shared},
+                                                           "layout": "pasture"})
+        window = os.path.join(home, "window.json")
+        if not os.path.exists(window):
+            write_json(window, {"state": "normal", "bounds": [120.0, 120.0, 1180.0, 780.0]})
+    if running:
+        subprocess.run(["herdr-app", "do", "layout.switch", "--name", "pasture"], env=env, capture_output=True, timeout=10)
+    # Bare herdr-app opens the window, or raises the one already running for this home.
+    subprocess.Popen(["herdr-app"], env=env, cwd=repo, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+    return {"home": home, "repo": repo, "mission": mission, "running": running}
+
+
 def cmd_dashboard(a, cfg):
     repo = os.path.abspath(os.path.expanduser(a.repo))
+    if a.window:
+        r = pasture_window(repo, a.mission)
+        emit(r, a.json, lambda r: f"{'raised' if r['running'] else 'opened'} pasture window ({r['home']})")
+        return
     rows = [r for r in mission_rows(repo, cfg) if a.all or not r["archived"]]
     selected = next((r for r in rows if r["id"] == a.mission), None) if a.mission else next(
         (r for r in rows if r["state"] == "running"), next((r for r in rows if not r["archived"]), None))
@@ -3318,6 +3393,7 @@ def main():
     s.add_argument("--repo", default=".")
     s.add_argument("--mission", help="which mission (default: newest running, else newest non-archived)")
     s.add_argument("--all", action="store_true", help="include archived missions")
+    s.add_argument("--window", action="store_true", help="open the pasture in its own window")
     for name, fn, help_ in (("route", cmd_route, "where and with what a role would start"),
                             ("run", cmd_run, "start a role on the best machine")):
         s = add(name, fn, help_)

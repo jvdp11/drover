@@ -1,9 +1,9 @@
-// Per-project mission flow. Props: { folder, name, space, mission?, showArchived?, demo? }.
-// openOverlay({ mod: "drover-dashboard", kind: "dialog", width: 1120, height: 760,
-//   props: { folder, name, space, mission } });
+// Per-project mission flow. Props: { folder, name, space, mission?, showArchived?, popout?, demo? }.
+// Shown as the project's "pasture" tab (tab.new with mod), as a dialog (ctrl-shift-d, props.overlay),
+// or alone in its own window (drover dashboard --window: props.popout).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { exec, theme, props, closeOverlay, run, shared, machines, panes, spaces, notify, playSound } from "herdr";
+import { exec, theme, props, closeOverlay, run, shared, machines, panes, spaces, notify, playSound, settings, window as appWindow } from "herdr";
 // Show an agent's terminal: focus its pane (switching space/tab first); with no pane, peek it.
 function showTerminal(terminal) {
   const pane = panes().find((p) => p.terminal === terminal);
@@ -370,8 +370,59 @@ export default class MissionDashboard extends View {
     this.phase = this.timeOfDay(); this.owl = null; this.perches = [];
     this.ducks = null; this.duckSeed = null; this.duckGen = 0; this.duckSpots = []; this.duckPond = null;
     this.tick(cx);
-    cx.timer.every(POLL_MS, (cx) => { this.load(cx); this.tick(cx); });
+    this.pickAt = Date.now();
+    cx.timer.every(POLL_MS, (cx) => { this.takePick(cx); this.load(cx); this.tick(cx); });
     cx.timer.every(2000, (cx) => this.peek(cx));
+  }
+
+  // Another mod reused this project's pasture tab and asked for a mission (shared "drover.pasture.pick").
+  takePick(cx) {
+    const pk = shared("drover.pasture.pick"), p = props() ?? {};
+    if (!pk || pk.folder !== p.folder || !(pk.at > this.pickAt)) return;
+    this.pickAt = pk.at;
+    if (pk.showArchived && !this.showArchived) { this.showArchived = true; this.selected = null; }
+    if (pk.mission) this.select(pk.mission, cx);
+  }
+
+  // Close the dialog this is in, if it is one (a tab or the pop-out window stays).
+  dismiss() { const o = props()?.overlay; if (o) closeOverlay(o); }
+
+  // Leave where this dashboard is shown: its dialog, or its own "pasture" tab (never another tab).
+  leave() {
+    const p = props() ?? {};
+    if (p.overlay) { closeOverlay(p.overlay); return; }
+    if (p.popout) return;
+    const s = spaces().find((x) => x.id === p.space) ?? spaces().find((x) => x.folder === p.folder && !x.machine);
+    const tab = s?.tabs.find((tb) => tb.name === "pasture" && tb.named);
+    if (tab && s.tabs.length > 1) run("tab.close", { id: tab.id, confirmed: true });
+  }
+
+  popOut(cx) {
+    const p = props() ?? {};
+    if (!p.folder) return;
+    const args = ["dashboard", "--window", "--repo", p.folder];
+    if (this.selected) args.push("--mission", this.selected);
+    cx.spawn(async (cx) => {
+      try {
+        const r = await exec("drover", args, { timeout: 20000 });
+        if (r.code !== 0) throw new Error(r.stderr?.trim() || `drover exited ${r.code}`);
+        this.leave();
+      } catch (e) { notify({ title: "Pop out failed", body: String(e?.message ?? e), level: "error" }); }
+      cx.notify();
+    });
+  }
+
+  // The pop-out window draws its own window buttons (Herdr's titlebar is off there).
+  windowControls(t) {
+    const w = appWindow();
+    const b = (id, icon, tip, cmd) => div().id(id).w(28).h(28).flex_none().rounded(7).flex().items_center().justify_center()
+      .cursor_pointer().tooltip(tip).hover((s) => s.bg(t.hover))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => run(cmd))
+      .child(svg(`mods/workspace-chrome/${icon}.svg`).size(icon === "x" ? 15 : 13).text_color(t.muted));
+    return h_flex().flex_none().gap(2).items_center()
+      .children(w?.platform === "macos" ? [] : [b("win-min", "minus", "Minimize", "window.minimize"),
+        b("win-max", "square", w?.maximized ? "Restore" : "Maximize", "window.maximize"),
+        b("win-close", "x", "Close window", "window.close")]);
   }
 
   select(id, cx) {
@@ -889,7 +940,7 @@ export default class MissionDashboard extends View {
         .children((this.peekLines.length ? this.peekLines : ["…"]).map((l, i) => div().id(`tail-${i}`).whitespace_normal().text_color(t.muted).child(l || " "))))
       .children(wake ? [wake] : [])
       .child(h_flex().gap(6).flex_wrap()
-        .child(btn("terminal", "Open terminal", t.accent, () => { closeOverlay(props().overlay); showTerminal(terminal); }, !terminal))
+        .child(btn("terminal", "Open terminal", t.accent, () => { this.dismiss(); showTerminal(terminal); }, !terminal))
         .child(btn("move", this.moveOpen ? "Replace coordinator… ▴" : "Replace coordinator… ▾", t.ansi5 || t.accent, (cx) => { this.moveOpen = !this.moveOpen; cx.notify(); }, !cands.length)))
       .children(picker ? [picker] : [])
       .children(this.result ? [div().id("panel-result").p(8).rounded(6).whitespace_normal().text_size(10)
@@ -929,7 +980,7 @@ export default class MissionDashboard extends View {
       .opacity(disabled ? 0.4 : 1).child(label);
     const row = (k, v) => h_flex().gap(8).text_size(11).child(div().w(60).flex_none().text_color(t.dim).child(k))
       .child(div().flex_1().min_w(0).whitespace_normal().child(v));
-    const buttons = [btn("terminal", "Open terminal", t.accent, () => { closeOverlay(props().overlay); showTerminal(terminal); }, !terminal)];
+    const buttons = [btn("terminal", "Open terminal", t.accent, () => { this.dismiss(); showTerminal(terminal); }, !terminal)];
     if (task.state === "done") buttons.push(btn("review", "Review", t.ansi5 || t.accent, (cx) => this.act(["task", "review", task.id], cx)));
     if (task.state === "approved") buttons.push(btn("merge", "Merge", t.done, (cx) => this.act(["task", "merge", task.id], cx)));
     if (!["merged", "dropped"].includes(task.state)) buttons.push(this.confirmDrop
@@ -990,7 +1041,7 @@ export default class MissionDashboard extends View {
           .children(go ? [div().id(`needs-act-${i}`).flex_none().px(8).py(3).rounded(5).cursor_pointer().bg(`${c}22`)
             .text_size(10).font_semibold().text_color(c).hover((s) => s.bg(`${c}44`))
             .on_click((_e, cx) => merge ? (this.openPanel(r.task, cx), this.act(["task", "merge", r.task], cx))
-              : (closeOverlay(props().overlay), showTerminal(term)))
+              : (this.dismiss(), showTerminal(term)))
             .tooltip(r.action || "")
             .child(merge ? "Retry merge" : "Open terminal →")] : []);
       }));
@@ -1046,7 +1097,7 @@ export default class MissionDashboard extends View {
       .cursor_pointer().hover((s) => s.bg(t.hover)).on_click(() => {
         const terminal = this.terminal(a);
         if (!terminal) return;
-        closeOverlay(props().overlay);
+        this.dismiss();
         showTerminal(terminal);
       }));
   }
@@ -1054,30 +1105,64 @@ export default class MissionDashboard extends View {
   // --- header: one row with logo, project, mission picker, progress, elapsed and est. cost ---
   header(t, p) {
     const d = this.data, m = d?.mission;
-    return h_flex().flex_none().h(54).px(16).gap(12).items_center().border_b(1).border_color(t.border)
+    const archive = !!(m && ["done", "stopped"].includes(m.state) && !m.archived && !this.demo && !p.popout);
+    const fit = this.headerFit(p, m, archive);
+    return h_flex().id("header").flex_none().h(54).px(16).gap(12).items_center().border_b(1).border_color(t.border)
+      .on_size_change((s, cx) => { if (Math.abs(s.width - (this.headerW || 0)) > 2) { this.headerW = s.width; cx.notify(); } })
       .child(div().w(30).h(30).flex_none().rounded(8).bg(t.accent).flex().items_center().justify_center()
         .child(svg("mods/drover-rail/drover.svg").size(20).text_color(t.accent_foreground)))
       .child(div().flex_none().text_size(15).font_semibold().child(p.name || d?.project || "Project"))
       .child(div().flex_none().tooltip(this.demo ? "Sample mission · demo mode" : this.error ? `${this.error}\nRetrying every ${POLL_MS / 1000}s`
         : `Live · refreshes every ${POLL_MS / 1000}s${d ? `\nUpdated ${ago(d.generated)}` : ""}`)
         .child(dot(this.error && !this.demo ? t.ansi3 || t.accent : t.ansi2 || t.done, !!d && this.live())))
-      .child(this.pickerButton(t))
-      .children(this.demo ? [pill(t, "DEMO", t.ansi3 || t.accent)] : [])
-      .children(this.switching ? [div().flex_none().text_size(10).text_color(t.muted).child("Loading…")] : [])
-      .child(div().flex_1())
-      .children(m ? [this.progress(t)] : [])
-      .child(this.worldToggles(t))
-      .children(m && ["done", "stopped"].includes(m.state) && !m.archived && !this.demo ? [
+      .child(h_flex().flex_1().min_w(160).gap(12).items_center()
+        .child(this.pickerButton(t))
+        .children(this.demo ? [pill(t, "DEMO", t.ansi3 || t.accent)] : [])
+        .children(this.switching ? [div().flex_none().text_size(10).text_color(t.muted).child("Loading…")] : []))
+      .children(m ? [this.progress(t, fit)] : [])
+      .child(this.worldToggles(t, fit.compact))
+      .children(p.popout ? [] : [div().id("pop-out").flex_none().px(9).py(5).rounded(6).cursor_pointer().text_size(11)
+        .text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip("Open the pasture in its own window, to put anywhere on the screen")
+        .on_click((_e, cx) => this.popOut(cx)).child("Pop out")])
+      .children(archive ? [
         div().id("archive-mission").flex_none().px(9).py(5).rounded(6).cursor_pointer().text_size(11).text_color(t.muted)
           .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.archive(cx))
           .child(this.archiving ? "Archiving…" : "Archive")] : [])
-      .child(div().id("close").w(28).h(28).flex_none().rounded(7).flex().items_center().justify_center().cursor_pointer()
-        .tooltip("Close (Esc)").hover((s) => s.bg(t.hover)).on_click(() => closeOverlay(props().overlay))
-        .child(svg("mods/workspace-chrome/x.svg").size(15).text_color(t.muted)));
+      .child(p.popout ? this.windowControls(t) : p.overlay ? div().id("close").w(28).h(28).flex_none().rounded(7).flex().items_center()
+        .justify_center().cursor_pointer().tooltip("Close (Esc)").hover((s) => s.bg(t.hover)).on_click(() => closeOverlay(props().overlay))
+        .child(svg("mods/workspace-chrome/x.svg").size(15).text_color(t.muted)) : div());
+  }
+
+  // What the header can show beside a mission name of at least 160px. Narrow windows (the pop-out)
+  // drop the least important first: the est. cost, then elapsed, then Auto/Day/Night shrinks to one toggle.
+  // Widths are estimates of each item (px), including the 12px gap before it.
+  headerFit(p, m, archive) {
+    // The measured size is in zoomed pixels; the estimates below are at zoom 1.
+    const w = (this.headerW || 1400) / (Number(settings()?.zoom) || 1), name = String(p.name || this.data?.project || "Project");
+    // padding, logo, name, live dot, picker (160), progress, Auto/Day/Night, sound, right-hand buttons.
+    let need = 32 + 42 + name.length * 9 + 12 + 20 + 172 + (m ? 150 : 0) + 127 + 59
+      + (archive ? 82 : 0) + (p.popout ? 97 : 70 + (p.overlay ? 40 : 0));
+    const fit = { cost: !!m, elapsed: !!m, compact: false };
+    if (m) need += 45 + 95;
+    if (fit.cost && need > w) { fit.cost = false; need -= 95; }
+    if (fit.elapsed && need > w) { fit.elapsed = false; need -= 45; }
+    if (need > w) fit.compact = true;
+    return fit;
   }
 
   // Header: pasture time of day (Auto / Day / Night) and sounds, remembered per viewer.
-  worldToggles(t) {
+  // Compact: one ☀/☾ button that steps Auto → Day → Night.
+  worldToggles(t, compact = false) {
+    if (compact) {
+      const next = { auto: "day", day: "night", night: "auto" }[this.timeMode] || "auto";
+      const night = this.phase === "night";
+      return h_flex().flex_none().gap(6).items_center()
+        .child(div().id("time-cycle").px(7).py(3).rounded(6).cursor_pointer().text_size(11).border(1).border_color(t.border)
+          .bg(this.timeMode === "auto" ? t.surface : `${t.accent}2a`).text_color(this.timeMode === "auto" ? t.muted : t.accent)
+          .hover((s) => s.bg(t.hover)).tooltip(`Pasture time: ${this.timeMode === "auto" ? `Auto (now ${clockPhase()})` : this.timeMode === "day" ? "always day" : "always night"}\nClick for ${next === "auto" ? "Auto" : next === "day" ? "Day" : "Night"}`)
+          .on_click((_e, cx) => this.setTimeMode(next, cx)).child(night ? "☾" : "☀"))
+        .child(this.soundToggle(t));
+    }
     const seg = (mode, label, tip) => div().id(`time-${mode}`).px(7).py(3).rounded(5).cursor_pointer().text_size(10).font_semibold()
       .bg(this.timeMode === mode ? `${t.accent}2a` : t.surface).text_color(this.timeMode === mode ? t.accent : t.muted)
       .hover((s) => s.bg(t.hover)).tooltip(tip).on_click((_e, cx) => this.setTimeMode(mode, cx)).child(label);
@@ -1086,16 +1171,20 @@ export default class MissionDashboard extends View {
         .child(seg("auto", "Auto", `Pasture follows the local clock (now ${clockPhase()})`))
         .child(seg("day", "Day", "Always day in the pasture"))
         .child(seg("night", "Night", "Always night in the pasture")))
-      .child(div().id("sound-toggle").px(7).py(3).rounded(6).cursor_pointer().text_size(11).border(1).border_color(t.border)
+      .child(this.soundToggle(t));
+  }
+
+  soundToggle(t) {
+    return div().id("sound-toggle").px(7).py(3).rounded(6).cursor_pointer().text_size(11).border(1).border_color(t.border)
         .text_color(this.sound ? t.accent : t.dim).hover((s) => s.bg(t.hover))
         .tooltip(this.sound ? "Sounds on: a bleat when a worker is done, a chime on a merge. Click to mute." : "Sounds off. Click for a bleat when a worker is done and a chime on a merge.")
-        .on_click((_e, cx) => this.toggleSound(cx)).child(this.sound ? "♪ on" : "♪ off"));
+        .on_click((_e, cx) => this.toggleSound(cx)).child(this.sound ? "♪ on" : "♪ off");
   }
 
   pickerButton(t) {
     const d = this.data, m = d?.mission;
     if (!d) return div().min_w(0).text_size(12).text_color(t.muted).child(this.error ? "Dashboard unavailable" : "Loading mission…");
-    return h_flex().id("mission-picker").flex_1().min_w(0).max_w(420).gap(7).items_center().px(9).py(5).rounded(7)
+    return h_flex().id("mission-picker").flex_1().min_w(160).max_w(420).gap(7).items_center().px(9).py(5).rounded(7)
       .border(1).border_color(this.picker ? t.accent : t.border).bg(t.surface).cursor_pointer().hover((s) => s.bg(t.hover))
       .tooltip(m ? `${m.id} · ${m.state}\n${m.goal || ""}${m.summary ? `\n${m.summary}` : ""}` : "Pick a mission")
       .on_click((_e, cx) => { if (Date.now() - (this.pickerClosed || 0) > 250) this.picker = !this.picker; cx.notify(); })
@@ -1123,7 +1212,7 @@ export default class MissionDashboard extends View {
         .child(div().flex_none().text_size(10).text_color(t.dim).child(`${count(m.merged)}/${count(m.tasks)}`)))));
   }
 
-  progress(t) {
+  progress(t, fit = { cost: true, elapsed: true }) {
     const d = this.data, m = d.mission;
     const tasks = d.tasks.filter((x) => x.state !== "dropped");
     const total = tasks.length;
@@ -1143,9 +1232,9 @@ export default class MissionDashboard extends View {
           .children(segs.filter(([c]) => c).map(([c, col, l]) => div().id(`seg-${l}`).h(6).bg(col)
             .w(`${100 * c / Math.max(1, total)}%`).transition("width", { duration: 700, easing: "ease-out" }))))
         .child(div().font_semibold().text_color(t.foreground).child(`${segs[0][0]}/${total}`)))
-      .child(div().id("elapsed").tooltip(`Elapsed · mission ${m.id}\nBase ${m.base || "—"}`).child(duration(end - seconds(m.created))))
-      .child(div().id("cost").tooltip(`Estimate only: list prices per model family applied to input, output and cache tokens of live agents. Not a bill.\nTokens ${compact(d.tokens?.total)} · coordinator ${compact(d.tokens?.coordinator)} · workers ${compact(d.tokens?.worker)} · reviewers ${compact(d.tokens?.reviewer)}`)
-        .child(cost == null ? "est. —" : `~$${cost.toFixed(2)} est.`));
+      .children(fit.elapsed ? [div().id("elapsed").tooltip(`Elapsed · mission ${m.id}\nBase ${m.base || "—"}`).child(duration(end - seconds(m.created)))] : [])
+      .children(fit.cost ? [div().id("cost").tooltip(`Estimate only: list prices per model family applied to input, output and cache tokens of live agents. Not a bill.\nTokens ${compact(d.tokens?.total)} · coordinator ${compact(d.tokens?.coordinator)} · workers ${compact(d.tokens?.worker)} · reviewers ${compact(d.tokens?.reviewer)}`)
+        .child(cost == null ? "est. —" : `~$${cost.toFixed(2)} est.`)] : []);
   }
 
   copy(text, cx) {
@@ -1333,7 +1422,7 @@ export default class MissionDashboard extends View {
     return el.tooltip(tip).when(!!this.terminal(a), (el) => el.cursor_pointer().on_click(() => {
       const terminal = this.terminal(a);
       if (!terminal) return;
-      closeOverlay(props().overlay);
+      this.dismiss();
       showTerminal(terminal);
     }));
   }
@@ -1922,7 +2011,7 @@ export default class MissionDashboard extends View {
     return v_flex().id("root").relative().track_focus(this.handle).size_full().min_h(0).bg(t.background).text_color(t.foreground)
       .on_key_down((e, cx) => {
         if (e.key !== "escape") return;
-        if (this.picker) { this.picker = false; cx.notify(); } else if (this.panel) this.closePanel(cx); else closeOverlay(props().overlay);
+        if (this.picker) { this.picker = false; cx.notify(); } else if (this.panel) this.closePanel(cx); else if (props()?.overlay) closeOverlay(props().overlay); else return;
         cx.stop_propagation();
       })
       .child(this.header(t, p))

@@ -577,6 +577,57 @@ def load_engine(state):
     return mod
 
 
+class PastureWindowTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="drover-pasture-")
+        self.addCleanup(self.temp.cleanup)
+        old = os.environ.get("XDG_STATE_HOME")
+        self.addCleanup(lambda: os.environ.__setitem__("XDG_STATE_HOME", old) if old else os.environ.pop("XDG_STATE_HOME", None))
+        self.d = load_engine(self.temp.name)
+        self.calls = []
+        test = self
+
+        class Done:
+            def __init__(self, code): self.returncode = code
+
+        class Fake:
+            @staticmethod
+            def run(argv, env=None, **_k):
+                test.calls.append(("run", argv, env["HERDR_APP_HOME"]))
+                return Done(0 if test.running else 1)
+
+            @staticmethod
+            def Popen(argv, env=None, **k):
+                test.calls.append(("popen", argv, env["HERDR_APP_HOME"], k.get("start_new_session")))
+
+            DEVNULL = subprocess.DEVNULL
+        self.d.subprocess = Fake
+        self.d.shutil = type("S", (), {"which": staticmethod(lambda _n: "/usr/bin/herdr-app")})
+        self.running = False
+
+    def test_prepares_home_and_starts_detached(self):
+        r = self.d.pasture_window("/work/My Repo", "m1")
+        home = Path(r["home"])
+        self.assertTrue(str(home).startswith(os.path.join(self.temp.name, "drover", "pasture-app", "my-repo-")))
+        layout = json.loads((home / "layouts" / "pasture.json").read_text())
+        self.assertEqual(layout["titlebar"], "none")
+        bar, pasture = layout["children"]
+        self.assertTrue(bar["window_drag"])
+        self.assertEqual(pasture["content"], {"mod": "drover-dashboard", "props": {
+            "folder": "/work/My Repo", "name": "My Repo", "popout": True, "mission": "m1"}})
+        self.assertTrue((home / "mods" / "drover-dashboard").is_symlink())
+        self.assertTrue((home / "mods" / "drover-titlebar").is_symlink())
+        self.assertEqual(json.loads((home / "shared.json").read_text())["layout"], "pasture")
+        self.assertEqual(self.calls[-1], ("popen", ["herdr-app"], str(home), True))
+
+    def test_running_window_is_raised_not_reseeded(self):
+        self.running = True
+        r = self.d.pasture_window("/work/repo", None)
+        self.assertTrue(r["running"])
+        self.assertFalse(Path(r["home"], "shared.json").exists())
+        self.assertIn(("run", ["herdr-app", "do", "layout.switch", "--name", "pasture"], r["home"]), self.calls)
+
+
 class CapacityTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="drover-cap-")
