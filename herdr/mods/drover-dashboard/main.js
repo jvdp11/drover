@@ -3,7 +3,7 @@
 // or alone in its own window (drover dashboard --window: props.popout).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { exec, theme, props, closeOverlay, run, shared, machines, panes, spaces, notify, playSound, window as appWindow } from "herdr";
+import { exec, theme, props, closeOverlay, run, shared, machines, panes, spaces, notify, playSound, settings, window as appWindow } from "herdr";
 // Show an agent's terminal: focus its pane (switching space/tab first); with no pane, peek it.
 function showTerminal(terminal) {
   const pane = panes().find((p) => p.terminal === terminal);
@@ -1105,23 +1105,26 @@ export default class MissionDashboard extends View {
   // --- header: one row with logo, project, mission picker, progress, elapsed and est. cost ---
   header(t, p) {
     const d = this.data, m = d?.mission;
-    return h_flex().flex_none().h(54).px(16).gap(12).items_center().border_b(1).border_color(t.border)
+    const archive = !!(m && ["done", "stopped"].includes(m.state) && !m.archived && !this.demo && !p.popout);
+    const fit = this.headerFit(p, m, archive);
+    return h_flex().id("header").flex_none().h(54).px(16).gap(12).items_center().border_b(1).border_color(t.border)
+      .on_size_change((s, cx) => { if (Math.abs(s.width - (this.headerW || 0)) > 2) { this.headerW = s.width; cx.notify(); } })
       .child(div().w(30).h(30).flex_none().rounded(8).bg(t.accent).flex().items_center().justify_center()
         .child(svg("mods/drover-rail/drover.svg").size(20).text_color(t.accent_foreground)))
       .child(div().flex_none().text_size(15).font_semibold().child(p.name || d?.project || "Project"))
       .child(div().flex_none().tooltip(this.demo ? "Sample mission · demo mode" : this.error ? `${this.error}\nRetrying every ${POLL_MS / 1000}s`
         : `Live · refreshes every ${POLL_MS / 1000}s${d ? `\nUpdated ${ago(d.generated)}` : ""}`)
         .child(dot(this.error && !this.demo ? t.ansi3 || t.accent : t.ansi2 || t.done, !!d && this.live())))
-      .child(this.pickerButton(t))
-      .children(this.demo ? [pill(t, "DEMO", t.ansi3 || t.accent)] : [])
-      .children(this.switching ? [div().flex_none().text_size(10).text_color(t.muted).child("Loading…")] : [])
-      .child(div().flex_1())
-      .children(m ? [this.progress(t)] : [])
-      .child(this.worldToggles(t))
+      .child(h_flex().flex_1().min_w(160).gap(12).items_center()
+        .child(this.pickerButton(t))
+        .children(this.demo ? [pill(t, "DEMO", t.ansi3 || t.accent)] : [])
+        .children(this.switching ? [div().flex_none().text_size(10).text_color(t.muted).child("Loading…")] : []))
+      .children(m ? [this.progress(t, fit)] : [])
+      .child(this.worldToggles(t, fit.compact))
       .children(p.popout ? [] : [div().id("pop-out").flex_none().px(9).py(5).rounded(6).cursor_pointer().text_size(11)
         .text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip("Open the pasture in its own window, to put anywhere on the screen")
         .on_click((_e, cx) => this.popOut(cx)).child("Pop out")])
-      .children(m && ["done", "stopped"].includes(m.state) && !m.archived && !this.demo && !p.popout ? [
+      .children(archive ? [
         div().id("archive-mission").flex_none().px(9).py(5).rounded(6).cursor_pointer().text_size(11).text_color(t.muted)
           .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.archive(cx))
           .child(this.archiving ? "Archiving…" : "Archive")] : [])
@@ -1130,8 +1133,36 @@ export default class MissionDashboard extends View {
         .child(svg("mods/workspace-chrome/x.svg").size(15).text_color(t.muted)) : div());
   }
 
+  // What the header can show beside a mission name of at least 160px. Narrow windows (the pop-out)
+  // drop the least important first: the est. cost, then elapsed, then Auto/Day/Night shrinks to one toggle.
+  // Widths are estimates of each item (px), including the 12px gap before it.
+  headerFit(p, m, archive) {
+    // The measured size is in zoomed pixels; the estimates below are at zoom 1.
+    const w = (this.headerW || 1400) / (Number(settings()?.zoom) || 1), name = String(p.name || this.data?.project || "Project");
+    // padding, logo, name, live dot, picker (160), progress, Auto/Day/Night, sound, right-hand buttons.
+    let need = 32 + 42 + name.length * 9 + 12 + 20 + 172 + (m ? 150 : 0) + 127 + 59
+      + (archive ? 82 : 0) + (p.popout ? 97 : 70 + (p.overlay ? 40 : 0));
+    const fit = { cost: !!m, elapsed: !!m, compact: false };
+    if (m) need += 45 + 95;
+    if (fit.cost && need > w) { fit.cost = false; need -= 95; }
+    if (fit.elapsed && need > w) { fit.elapsed = false; need -= 45; }
+    if (need > w) fit.compact = true;
+    return fit;
+  }
+
   // Header: pasture time of day (Auto / Day / Night) and sounds, remembered per viewer.
-  worldToggles(t) {
+  // Compact: one ☀/☾ button that steps Auto → Day → Night.
+  worldToggles(t, compact = false) {
+    if (compact) {
+      const next = { auto: "day", day: "night", night: "auto" }[this.timeMode] || "auto";
+      const night = this.phase === "night";
+      return h_flex().flex_none().gap(6).items_center()
+        .child(div().id("time-cycle").px(7).py(3).rounded(6).cursor_pointer().text_size(11).border(1).border_color(t.border)
+          .bg(this.timeMode === "auto" ? t.surface : `${t.accent}2a`).text_color(this.timeMode === "auto" ? t.muted : t.accent)
+          .hover((s) => s.bg(t.hover)).tooltip(`Pasture time: ${this.timeMode === "auto" ? `Auto (now ${clockPhase()})` : this.timeMode === "day" ? "always day" : "always night"}\nClick for ${next === "auto" ? "Auto" : next === "day" ? "Day" : "Night"}`)
+          .on_click((_e, cx) => this.setTimeMode(next, cx)).child(night ? "☾" : "☀"))
+        .child(this.soundToggle(t));
+    }
     const seg = (mode, label, tip) => div().id(`time-${mode}`).px(7).py(3).rounded(5).cursor_pointer().text_size(10).font_semibold()
       .bg(this.timeMode === mode ? `${t.accent}2a` : t.surface).text_color(this.timeMode === mode ? t.accent : t.muted)
       .hover((s) => s.bg(t.hover)).tooltip(tip).on_click((_e, cx) => this.setTimeMode(mode, cx)).child(label);
@@ -1140,16 +1171,20 @@ export default class MissionDashboard extends View {
         .child(seg("auto", "Auto", `Pasture follows the local clock (now ${clockPhase()})`))
         .child(seg("day", "Day", "Always day in the pasture"))
         .child(seg("night", "Night", "Always night in the pasture")))
-      .child(div().id("sound-toggle").px(7).py(3).rounded(6).cursor_pointer().text_size(11).border(1).border_color(t.border)
+      .child(this.soundToggle(t));
+  }
+
+  soundToggle(t) {
+    return div().id("sound-toggle").px(7).py(3).rounded(6).cursor_pointer().text_size(11).border(1).border_color(t.border)
         .text_color(this.sound ? t.accent : t.dim).hover((s) => s.bg(t.hover))
         .tooltip(this.sound ? "Sounds on: a bleat when a worker is done, a chime on a merge. Click to mute." : "Sounds off. Click for a bleat when a worker is done and a chime on a merge.")
-        .on_click((_e, cx) => this.toggleSound(cx)).child(this.sound ? "♪ on" : "♪ off"));
+        .on_click((_e, cx) => this.toggleSound(cx)).child(this.sound ? "♪ on" : "♪ off");
   }
 
   pickerButton(t) {
     const d = this.data, m = d?.mission;
     if (!d) return div().min_w(0).text_size(12).text_color(t.muted).child(this.error ? "Dashboard unavailable" : "Loading mission…");
-    return h_flex().id("mission-picker").flex_1().min_w(0).max_w(420).gap(7).items_center().px(9).py(5).rounded(7)
+    return h_flex().id("mission-picker").flex_1().min_w(160).max_w(420).gap(7).items_center().px(9).py(5).rounded(7)
       .border(1).border_color(this.picker ? t.accent : t.border).bg(t.surface).cursor_pointer().hover((s) => s.bg(t.hover))
       .tooltip(m ? `${m.id} · ${m.state}\n${m.goal || ""}${m.summary ? `\n${m.summary}` : ""}` : "Pick a mission")
       .on_click((_e, cx) => { if (Date.now() - (this.pickerClosed || 0) > 250) this.picker = !this.picker; cx.notify(); })
@@ -1177,7 +1212,7 @@ export default class MissionDashboard extends View {
         .child(div().flex_none().text_size(10).text_color(t.dim).child(`${count(m.merged)}/${count(m.tasks)}`)))));
   }
 
-  progress(t) {
+  progress(t, fit = { cost: true, elapsed: true }) {
     const d = this.data, m = d.mission;
     const tasks = d.tasks.filter((x) => x.state !== "dropped");
     const total = tasks.length;
@@ -1197,9 +1232,9 @@ export default class MissionDashboard extends View {
           .children(segs.filter(([c]) => c).map(([c, col, l]) => div().id(`seg-${l}`).h(6).bg(col)
             .w(`${100 * c / Math.max(1, total)}%`).transition("width", { duration: 700, easing: "ease-out" }))))
         .child(div().font_semibold().text_color(t.foreground).child(`${segs[0][0]}/${total}`)))
-      .child(div().id("elapsed").tooltip(`Elapsed · mission ${m.id}\nBase ${m.base || "—"}`).child(duration(end - seconds(m.created))))
-      .child(div().id("cost").tooltip(`Estimate only: list prices per model family applied to input, output and cache tokens of live agents. Not a bill.\nTokens ${compact(d.tokens?.total)} · coordinator ${compact(d.tokens?.coordinator)} · workers ${compact(d.tokens?.worker)} · reviewers ${compact(d.tokens?.reviewer)}`)
-        .child(cost == null ? "est. —" : `~$${cost.toFixed(2)} est.`));
+      .children(fit.elapsed ? [div().id("elapsed").tooltip(`Elapsed · mission ${m.id}\nBase ${m.base || "—"}`).child(duration(end - seconds(m.created)))] : [])
+      .children(fit.cost ? [div().id("cost").tooltip(`Estimate only: list prices per model family applied to input, output and cache tokens of live agents. Not a bill.\nTokens ${compact(d.tokens?.total)} · coordinator ${compact(d.tokens?.coordinator)} · workers ${compact(d.tokens?.worker)} · reviewers ${compact(d.tokens?.reviewer)}`)
+        .child(cost == null ? "est. —" : `~$${cost.toFixed(2)} est.`)] : []);
   }
 
   copy(text, cx) {
