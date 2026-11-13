@@ -3,7 +3,7 @@
 //   props: { folder, name, space, mission } });
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { exec, theme, props, closeOverlay, run, shared, machines, panes, spaces, notify } from "herdr";
+import { exec, theme, props, closeOverlay, run, shared, machines, panes, spaces, notify, appHome } from "herdr";
 // Show an agent's terminal: focus its pane (switching space/tab first); with no pane, peek it.
 function showTerminal(terminal) {
   const pane = panes().find((p) => p.terminal === terminal);
@@ -22,8 +22,8 @@ const SPR = "mods/drover-dashboard/sprites/";
 const AW = 360, AH = 170, SKY = 24;
 const ZONE = { queued: "pen", working: "meadow", changes: "meadow", done: "gate", review: "gate", approved: "past", merged: "barn" };
 const ACTIVE = ["queued", "working", "changes", "done", "review"];
-const FAMILIES = { anthropic: "anthropic", openai: "openai", cursor: "cursor", github: "github", copilot: "github" };
-const BY_AGENT = { claude: "anthropic", codex: "openai", cursor: "cursor", copilot: "github" };
+const FAMILIES = { anthropic: "anthropic", openai: "openai", cursor: "cursor", github: "github", copilot: "github", google: "google" };
+const BY_AGENT = { claude: "anthropic", codex: "openai", cursor: "cursor", copilot: "github", gemini: "google" };
 const hash = (s) => { let h = 7; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h; };
 // Sprite files carry a 1px transparent margin; the image is drawn one pixel out and clipped to the w x h art box,
 // which cuts off the faint lines the renderer leaves along an image's outer edge.
@@ -36,6 +36,43 @@ const flip = (a, b, w, h, sc, period = 700) => div().relative().w(w * sc).h(h * 
   .child(div().absolute().left(0).top(0).loop("opacity", { from: -8, to: 9, period, easing: "linear" }).child(spr(b, w, h, sc)));
 // Pasture motion: zone changes trot over TROT ms; walking paths step every STEP_MS.
 const TROT = 1600, STEP_MS = 110, LINE = 13;
+
+// --- Events and actors ---
+// Task size S/M/L draws the same sheep at 0.8x / 1x / 1.2x.
+const sizeK = (task) => ({ S: 0.8, M: 1, L: 1.2 })[String(task?.size || "M")[0].toUpperCase()] || 1;
+// Sprite contract v2 names fall back to the v1 files while a v2 file is missing (see MissionDashboard.art).
+const V1P = { walk3: "walk1", walk4: "walk2", graze1: "graze", graze2: "graze", stuck: "alert" };
+const V2P = { walk2: "walk3", graze: "graze1" };
+const POSES = { walk: ["walk1", "walk2"], run: ["run1", "run2"], idle: ["idle1", "idle2"], wag: ["wag1", "wag2"] };
+// Effects without a sprite yet are drawn as a coloured glyph.
+const GLYPH = { heart: ["♥", "#e0476b"], confetti1: ["✦", "#f2b632"], confetti2: ["✺", "#4f9be0"], sparkle1: ["✦", "#ffe36a"], sparkle2: ["✧", "#fff1a8"], note: ["♪", "#25303a"] };
+// Where scenes happen: ONE place for every named anchor, in art pixels (top-left of the figure standing there).
+// A point is [ax, ay] on the pasture grid, or ["barn", dx, dy] relative to the barn's top-left.
+// Other layers (scenery, weather, night) should place things through these names too.
+function layout(v2) {
+  const bw = v2 ? 64 : 48, bh = v2 ? 56 : 40, bx = v2 ? 296 : 306;
+  return {
+    home: [8, SKY + 6],         // where the drover stands
+    edge: [-34, SKY + 6],       // just off the left of the pasture: drovers walk in and out here
+    penGate: [52, 92],          // gate tile in the pen's fence
+    penIn: [38, 112],           // inside the pen, by the gate
+    meadow: [150, 66],          // middle of the meadow
+    reviewGate: [222, 92],      // gate between meadow and review area
+    reviewZone: [250, 104],     // where a sheep waits in review
+    dog: [220, 116],            // the sheepdog's spot
+    past: [300, 100],           // approved sheep wait here
+    barn: [bx, SKY + 2, bw, bh], // x, y, w, h
+    barnDoor: ["barn", bw / 2 - 12, bh - 26],
+  };
+}
+// Scene stage: S = { a: { drover, drover2, dog, "s:<task>": { at, dir, pose, msg, fam, hide, lamb } }, gate: { pen, rev }, barn, fx: [{ k, on | at }], move }.
+const put = (S, k, p) => { S.a[k] = { ...S.a[k], ...p }; };
+// Walk (or run) actor k to a point, turning to face the way it goes.
+const go = (S, k, at, p = {}) => {
+  const from = S.a[k]?.at || S.home[k] || at, x = (q) => (typeof q[0] === "string" ? S.L.barn[0] + q[1] : q[0]);
+  put(S, k, { at, dir: x(at) < x(from) ? "l" : x(at) > x(from) ? "r" : S.a[k]?.dir || "r", ...p });
+};
+const newStage = (L) => ({ L, a: {}, gate: {}, barn: false, fx: [], move: 300, home: { drover: L.home, drover2: L.edge, dog: L.dog } });
 // Wrap text to lines of at most n chars; past `max` lines the last one ends in an ellipsis.
 function wrap(text, n, max = 2) {
   const words = String(text || "").replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
@@ -179,16 +216,16 @@ const SAMPLE = {
   ],
   tasks: [
     { id: "t1", title: "Stream mission state from the engine", state: "merged", agent: "gemini", model: "gemini-3", machine: "workstation", rounds: 1, created: NOW - 5000, updated: NOW - 3600, review: { model: "sonnet", family: "anthropic", verdict: "approve" }, tokens: { total: 12000 } },
-    { id: "t2", title: "Polish the project rail", state: "merged", agent: "cursor", machine: "studio", rounds: 2, created: NOW - 5000, updated: NOW - 2400, review: { model: "gpt-5.4", family: "openai", verdict: "approve" }, tokens: { total: 15000 } },
-    { id: "t3", title: "Redesign the dashboard overview", state: "working", agent: "codex", model: "gpt-5.4", machine: "workstation", rounds: 0, depends_on: ["t1"], created: NOW - 3000, updated: NOW - 20, review: null, tokens: { total: 200000 },
+    { id: "t2", size: "M", title: "Polish the project rail", state: "merged", agent: "cursor", machine: "studio", rounds: 2, created: NOW - 5000, updated: NOW - 2400, review: { model: "gpt-5.4", family: "openai", verdict: "approve" }, tokens: { total: 15000 } },
+    { id: "t3", size: "L", title: "Redesign the dashboard overview", state: "working", agent: "codex", model: "gpt-5.4", machine: "workstation", rounds: 0, depends_on: ["t1"], created: NOW - 3000, updated: NOW - 20, review: null, tokens: { total: 200000 },
       alternatives: [{ agent: "claude", model: "sonnet", family: "anthropic", used_percent: 41, resets_at: NOW + 9000 }, { agent: "gemini", model: "gemini-3", family: "google", used_percent: 23, resets_at: NOW + 50000 }, { agent: "cursor", model: null, family: "cursor", used_percent: null, resets_at: null }] },
-    { id: "t4", title: "Add project entry points", state: "changes", agent: "claude", model: "sonnet", machine: "studio", rounds: 1, depends_on: ["t2"], created: NOW - 2800, updated: NOW - 300, review: { model: "gpt-5.4", family: "openai", verdict: "changes" }, tokens: { total: 60000 } },
-    { id: "t5", title: "Animate the mission flow", state: "review", agent: "codex", model: "gpt-5.4", machine: "workstation", rounds: 1, created: NOW - 2000, updated: NOW - 100, review: { model: "sonnet", family: "anthropic", verdict: null }, tokens: { total: 60000 },
+    { id: "t4", size: "S", title: "Add project entry points", state: "changes", agent: "claude", model: "sonnet", machine: "studio", rounds: 1, depends_on: ["t2"], created: NOW - 2800, updated: NOW - 300, review: { model: "gpt-5.4", family: "openai", verdict: "changes" }, tokens: { total: 60000 } },
+    { id: "t5", size: "M", title: "Animate the mission flow", state: "review", agent: "codex", model: "gpt-5.4", machine: "workstation", rounds: 1, created: NOW - 2000, updated: NOW - 100, review: { model: "sonnet", family: "anthropic", verdict: null }, tokens: { total: 60000 },
       alternatives: [{ agent: "gemini", model: "gemini-3", family: "google", used_percent: 23, resets_at: NOW + 50000 }, { agent: "cursor", model: null, family: "cursor", used_percent: 67, resets_at: NOW + 3600 }] },
-    { id: "t6", title: "Document the dashboard", state: "approved", agent: "claude", model: "opus", machine: "studio", rounds: 1, created: NOW - 1800, updated: NOW - 60, review: { model: "gpt-5.4", family: "openai", verdict: "approve" }, tokens: { total: 30000 } },
-    { id: "t7", title: "Ship release notes", state: "queued", agent: null, rounds: 0, depends_on: ["t3", "t5"], created: NOW - 1000, updated: NOW - 1000, review: null, tokens: null },
-    { id: "t9", title: "Localise the dashboard", state: "queued", agent: null, rounds: 0, depends_on: ["t4"], created: NOW - 900, updated: NOW - 900, review: null, tokens: null },
-    { id: "t10", title: "Animate the barn door", state: "working", agent: "claude", model: "haiku", machine: "studio", rounds: 0, created: NOW - 700, updated: NOW - 10, review: null, tokens: { total: 8000 } },
+    { id: "t6", size: "L", title: "Document the dashboard", state: "approved", agent: "claude", model: "opus", machine: "studio", rounds: 1, created: NOW - 1800, updated: NOW - 60, review: { model: "gpt-5.4", family: "openai", verdict: "approve" }, tokens: { total: 30000 } },
+    { id: "t7", size: "M", title: "Ship release notes", state: "queued", agent: null, rounds: 0, depends_on: ["t3", "t5"], created: NOW - 1000, updated: NOW - 1000, review: null, tokens: null },
+    { id: "t9", size: "S", title: "Localise the dashboard", state: "queued", agent: null, rounds: 0, depends_on: ["t4"], created: NOW - 900, updated: NOW - 900, review: null, tokens: null },
+    { id: "t10", size: "S", title: "Animate the barn door", state: "working", agent: "claude", model: "haiku", machine: "studio", rounds: 0, created: NOW - 700, updated: NOW - 10, review: null, tokens: { total: 8000 } },
     { id: "t11", title: "Tidy the changelog", state: "merged", agent: "claude", model: "sonnet", machine: "studio", rounds: 1, created: NOW - 4800, updated: NOW - 3000, review: { model: "gpt-5.4", family: "openai", verdict: "approve" }, tokens: { total: 9000 } },
     { id: "t8", title: "Experiment with a 3D view", state: "dropped", reason: "Out of scope for this mission", rounds: 0, created: NOW - 4000, updated: NOW - 3500, tokens: null },
   ],
@@ -264,6 +301,18 @@ export default class MissionDashboard extends View {
     this.sayInput = InputState.new({ placeholder: "Say something to this agent…" });
     // Demo only: props.panel opens that sheep's panel at start, props.move also opens its "Move to…" picker.
     { const p = props() || {}; if (p.demo && p.panel) { this.panel = p.panel; this.moveOpen = !!p.move; } }
+    // Events and actors: queued scenes play one at a time on `stage`. `have` lists the sprite files that exist.
+    this.have = new Set(); this.queue = []; this.playing = false; this.last = null;
+    this.pending = new Set(); this.pendingMerge = new Set();
+    this.stage = newStage(layout(false));
+    this.replay = !!(props()?.demo && props()?.events);
+    cx.spawn(async (cx) => {
+      try {
+        const r = await exec("ls", [`${appHome()}/${SPR}`]);
+        this.have = new Set(String(r.stdout || "").split("\n").map((n) => n.replace(/\.svg$/, "")).filter(Boolean));
+        cx.notify();
+      } catch { /* v1 names stay in use */ }
+    });
     cx.timer.every(POLL_MS, (cx) => this.load(cx));
     cx.timer.every(2000, (cx) => this.peek(cx));
   }
@@ -285,13 +334,14 @@ export default class MissionDashboard extends View {
     if (p.demo) {
       const calm = p.demo === "calm" || this.selected === "demo-old";
       // The demo's t10 goes to review and back every 12s, so its sheep can be seen trotting.
-      const phase = calm ? 0 : Math.floor(Date.now() / 12000) % 2;
+      const phase = calm || p.events ? 0 : Math.floor(Date.now() / 12000) % 2;
       if (!this.data || this.demoCalm !== calm || this.demoPhase !== phase) {
         const d = demoData(calm);
         if (phase) for (const k of d.tasks) if (k.id === "t10") k.state = "review";
         this.noteMoves(d, cx);
         this.data = d; this.demo = true; this.demoCalm = calm; this.demoPhase = phase; this.switching = false; this.error = null; cx.notify();
       }
+      if (this.replay) this.pump(cx);
       return;
     }
     if (!p.folder) { this.error = "Open this dashboard with a project folder."; cx.notify(); return; }
@@ -309,6 +359,7 @@ export default class MissionDashboard extends View {
           || !(d.mission === null || typeof d.mission === "object" && d.mission?.id)) throw new Error("Invalid dashboard response");
         if (version !== this.version) return;
         this.noteMoves(d, cx);
+        this.events(d, cx);
         this.data = d;
         this.switching = false;
         this.error = null;
@@ -330,6 +381,175 @@ export default class MissionDashboard extends View {
     if (!d.tasks.some((k) => before.has(k.id) && before.get(k.id) !== k.state)) return;
     this.trotUntil = Date.now() + TROT;
     cx.timer.after(TROT + 120, (cx) => cx.notify());
+  }
+
+  // --- sprite lookup: contract v2 names, else the v1 files ---
+  art(kind, fam, pose, dir) {
+    const l = dir === "l" ? "-l" : "", has = (n) => this.have.has(n), f1 = fam === "google" ? "other" : fam;
+    let a;
+    if (kind === "sheep") return has(a = `sheep2-${fam}-${V2P[pose] || pose}${l}`) ? { file: a, w: 24, h: 24 } : { file: `sheep-${f1}-${V1P[pose] || pose}${l}`, w: 16, h: 16 };
+    if (kind === "lamb") return has(a = `sheep2-lamb-${pose}${l}`) ? { file: a, w: 16, h: 16 } : { file: `sheep-other-${pose}${l}`, w: 16, h: 16 };
+    if (kind === "drover") return has(a = `drover2-${fam}-${pose}${l}`) ? { file: a, w: 24, h: 32 }
+      : { file: `drover-${["idle2", "walk2", "walk4", "read", "doze"].includes(pose) ? 2 : 1}`, w: 16, h: 24 };
+    return has(a = `dog2-${pose}${l}`) ? { file: a, w: 24, h: 18 } : { file: `dog-${["run2", "run4", "wag2"].includes(pose) ? 2 : 1}`, w: 16, h: 12 };
+  }
+
+  dim(kind) { return this.art(kind, "other", { sheep: "sit", lamb: "walk1", drover: "idle1", dog: "sit" }[kind], "r"); }
+
+  // A figure: one pose, or two poses flipped natively.
+  fig(kind, fam, poses, dir, sc, period = 500) {
+    const a = poses.map((p) => this.art(kind, fam, p, dir));
+    return a.length > 1 && a[0].file !== a[1].file ? flip(a[0].file, a[1].file, a[0].w, a[0].h, sc, period) : spr(a[0].file, a[0].w, a[0].h, sc);
+  }
+
+  // Scenery with a fallback: { file, w, h }.
+  scn(v2, v1, w2, h2, w1, h1) { return this.have.has(v2) ? { file: v2, w: w2, h: h2 } : { file: v1, w: w1, h: h1 }; }
+
+  fxEl(k, sc) {
+    const g = GLYPH[k];
+    return this.have.has(k) || !g ? spr(k, 8, 8, sc)
+      : div().w(8 * sc).h(8 * sc).flex().items_center().justify_center().text_size(7 * sc).font_semibold().text_color(g[1]).child(g[0]);
+  }
+
+  // --- event layer: diff each snapshot against the last, queue short scenes, play them in order ---
+  snap(d) {
+    const keep = this.data;
+    this.data = d;
+    try {
+      const co = d.agents.find((a) => a.role === "coordinator");
+      return { id: d.mission?.id,
+        tasks: new Map(d.tasks.map((k) => {
+          const w = d.agents.find((a) => a.task === k.id && a.role === "worker");
+          return [k.id, { state: k.state, agent: k.agent, verdict: k.review?.verdict || null, alert: this.sheepStatus(k, w) === "alert", fam: this.famKey(w, k.agent) }];
+        })),
+        co: co ? { agent: co.agent, fam: this.famKey(co), status: co.status, asleep: this.coordAsleep() } : null };
+    } finally { this.data = keep; }
+  }
+
+  // The first snapshot (and a switch to another mission) plays nothing.
+  events(d, cx) {
+    const prev = this.last, cur = this.snap(d);
+    this.last = cur;
+    if (this.replay) return;
+    if (!prev || prev.id !== cur.id) { this.queue = []; this.pending.clear(); this.pendingMerge.clear(); return; }
+    const STATE = { done: "done", review: "review", changes: "changes", approved: "approve", merged: "merge" };
+    const evs = [];
+    for (const [id, n] of cur.tasks) {
+      const o = prev.tasks.get(id);
+      if (!o) { evs.push({ k: "added", id, queued: n.state === "queued" }); continue; }
+      if (o.agent && n.agent && o.agent !== n.agent) evs.push({ k: "reroute", id, from: o.fam, to: n.fam });
+      if (o.state !== n.state) { if (STATE[n.state]) evs.push({ k: STATE[n.state], id }); }
+      else if (n.verdict && o.verdict !== n.verdict) evs.push({ k: n.verdict === "approve" ? "approve" : "changes", id });
+      if (!o.alert && n.alert) evs.push({ k: "stuck", id });
+    }
+    if (prev.co && cur.co) {
+      if (prev.co.agent !== cur.co.agent) evs.push({ k: "handover", from: prev.co.fam, to: cur.co.fam });
+      else if (prev.co.status !== cur.co.status || prev.co.asleep !== cur.co.asleep)
+        evs.push({ k: "status", text: cur.co.asleep ? "zzz… out of capacity" : cur.co.status === "blocked" ? "I'm stuck, need a hand" : cur.co.status === "working" ? "back to work" : "all quiet" });
+    }
+    for (const e of evs) this.enqueue(e);
+    this.pump(cx);
+  }
+
+  enqueue(e) {
+    const sc = this.build(e);
+    if (!sc) return;
+    if (e.k === "added") this.pending.add(e.id);
+    if (e.k === "merge") this.pendingMerge.add(e.id);
+    this.queue.push(sc);
+    while (this.queue.length > 12) { const x = this.queue.shift().ev; this.pending.delete(x.id); this.pendingMerge.delete(x.id); }
+  }
+
+  // Play the next queued scene: one cx.timer.after per step, no redraw timers.
+  pump(cx) {
+    if (this.playing) return;
+    if (!this.queue.length && this.replay) { this.script().forEach((e) => this.enqueue(e)); this.queue.push({ ev: {}, steps: [[2500, null]] }); }
+    const sc = this.queue.shift();
+    if (!sc) return;
+    this.playing = true;
+    const L = layout(this.have.has("barn2-closed")), S = this.stage = newStage(L);
+    // Sheep scenes end with a trot to the settled place, so the tail waits for it.
+    const steps = [...sc.steps, [sc.ev.id ? TROT + 120 : 250, () => {
+      this.pending.delete(sc.ev.id); this.pendingMerge.delete(sc.ev.id);
+      this.stage = newStage(L); this.trotUntil = Date.now() + TROT;
+    }]];
+    const run = (i, cx) => {
+      const [ms, fn] = steps[i], S = this.stage;
+      S.fx = []; S.move = ms;
+      for (const a of Object.values(S.a)) delete a.msg;
+      fn?.(S);
+      cx.notify();
+      cx.timer.after(ms, (cx) => { if (i + 1 < steps.length) run(i + 1, cx); else { this.playing = false; cx.notify(); this.pump(cx); } });
+    };
+    run(0, cx);
+  }
+
+  // The demo replay: every scene once, on the demo mission's tasks.
+  script() {
+    return [{ k: "added", id: "t7", queued: true }, { k: "done", id: "t5" }, { k: "review", id: "t3" }, { k: "changes", id: "t5" },
+      { k: "approve", id: "t5" }, { k: "merge", id: "t6" }, { k: "reroute", id: "t10", from: "anthropic", to: "openai" }, { k: "stuck", id: "t4" },
+      { k: "status", text: "back to work" }, { k: "handover", from: "anthropic", to: "openai" }];
+  }
+
+  // Scene scripts: [ms, fn(stage)] steps. Walking steps last as long as the walk (stage.move drives the native transition).
+  build(e) {
+    const L = layout(this.have.has("barn2-closed")), k = `s:${e.id}`, M = L.meadow, G = L.reviewGate, Z = L.reviewZone;
+    const W = { pose: "walk" }, at = (p, dx, dy) => (typeof p[0] === "string" ? [p[0], p[1] + dx, p[2] + dy] : [p[0] + dx, p[1] + dy]);
+    const rest = (S, ...ks) => ks.forEach((x) => delete S.a[x]);
+    const steps = {
+      // a lamb appears in the pen, the drover opens the gate and leads it out
+      added: () => [
+        [900, (S) => { this.pending.delete(e.id); put(S, k, { at: L.penIn, pose: "walk", lamb: true, dir: "r" }); S.fx.push({ k: "sparkle1", on: k }); }],
+        [1500, (S) => go(S, "drover", at(L.penGate, -4, -34), W)],
+        [600, (S) => { put(S, "drover", { pose: "idle", dir: "r" }); S.gate.pen = true; }],
+        [900, (S) => go(S, k, at(L.penGate, -4, -14), W)],
+        [1300, (S) => { go(S, "drover", at(L.penGate, 40, -34), W); go(S, k, at(L.penGate, 16, -14), W); }],
+        ...(e.queued ? [[1000, (S) => go(S, k, L.penIn, W)]] : []),
+        [900, (S) => { S.gate.pen = false; go(S, "drover", L.home, W); }],
+      ],
+      done: () => [[2200, (S) => put(S, k, { msg: "baa, done!" })]],
+      // the drover whistles, the dog herds the sheep to the gate and sits
+      review: () => [
+        [1000, (S) => { put(S, k, { at: M, pose: "graze1", dir: "r" }); put(S, "drover", { pose: "whistle" }); S.fx.push({ k: "note", on: "drover" }); }],
+        [1300, (S) => { rest(S, "drover"); go(S, "dog", at(M, 28, 6), { pose: "run" }); }],
+        [1800, (S) => { S.gate.rev = true; go(S, k, at(G, -8, -6), W); go(S, "dog", at(G, -34, 6), { pose: "run" }); }],
+        [800, (S) => { put(S, k, { pose: "sit" }); go(S, "dog", L.dog, { pose: "run" }); }],
+        [600, (S) => { put(S, "dog", { pose: "sit" }); S.gate.rev = false; }],
+      ],
+      // the dog barks, the sheep trots back to the meadow
+      changes: () => [
+        [1000, (S) => { put(S, k, { at: Z, pose: "sit", dir: "l" }); put(S, "dog", { pose: "bark", dir: "l", msg: "woof!" }); }],
+        [1700, (S) => { S.gate.rev = true; put(S, "dog", { pose: "sit" }); go(S, k, M, W); }],
+        [400, (S) => { S.gate.rev = false; put(S, k, { pose: "graze1" }); }],
+      ],
+      // the dog wags, the gate opens, the sheep passes
+      approve: () => [
+        [1000, (S) => { put(S, k, { at: Z, pose: "sit", dir: "l" }); put(S, "dog", { pose: "wag", dir: "l" }); }],
+        [800, (S) => { S.gate.rev = true; go(S, k, at(G, 12, 0), W); }],
+        [1500, (S) => go(S, k, L.past, W)],
+        [400, (S) => { S.gate.rev = false; put(S, "dog", { pose: "sit" }); put(S, k, { pose: "sit" }); }],
+      ],
+      // the barn door opens, the sheep walks in: hearts, confetti, a new hay bale
+      merge: () => [
+        [800, (S) => { S.barn = true; put(S, k, { at: L.past, pose: "sit", dir: "r" }); }],
+        [1500, (S) => go(S, k, L.barnDoor, W)],
+        [1300, (S) => { put(S, k, { hide: true }); this.pendingMerge.delete(e.id); S.fx.push({ k: "heart", at: at(L.barnDoor, 6, -10) }, { k: "confetti1", at: at(L.barnDoor, -8, -4) }, { k: "confetti2", at: at(L.barnDoor, 18, -6) }); }],
+        [700, (S) => { S.barn = false; S.fx.push({ k: "heart", at: at(L.barnDoor, 0, -14) }); }],
+      ],
+      reroute: () => [
+        [700, (S) => { put(S, k, { fam: e.from }); S.fx.push({ k: "sparkle1", on: k }); }],
+        [1100, (S) => { put(S, k, { fam: e.to }); S.fx.push({ k: "sparkle2", on: k }); }],
+      ],
+      stuck: () => [[2800, (S) => { put(S, k, { pose: "stuck" }); S.fx.push({ k: "bubble-alert", on: k }); }]],
+      // a new drover in the new family's colours walks in while the old one walks off
+      handover: () => [
+        [200, (S) => { put(S, "drover", { at: L.home, fam: e.from, pose: "idle", dir: "r" }); put(S, "drover2", { at: L.edge, fam: e.to, pose: "walk", dir: "r" }); }],
+        [1900, (S) => { go(S, "drover", at(L.edge, 0, 26), W); go(S, "drover2", L.home, W); }],
+        [1200, (S) => put(S, "drover2", { pose: "idle", msg: "I've got it from here" })],
+      ],
+      status: () => [[2000, (S) => put(S, "drover", { msg: e.text })]],
+    }[e.k];
+    return steps ? { ev: e, steps: steps() } : null;
   }
 
   // --- sheep side panel: live terminal tail and actions ---
@@ -905,21 +1125,26 @@ export default class MissionDashboard extends View {
 
   // One sheep with its top-left at (x, y). Working sheep walk a short path and graze at either end,
   // keyframed natively with `frames`; a sheep that changes spot trots there through `transition`.
-  // o: { sc, tag, after, path (art px), trot ("r"/"l") }
+  // o: { sc, tag, after, path (art px), trot ("r"/"l"), act (scene override: pose, dir, fam, lamb, hide, move) }
   sheep(t, task, x, y, o) {
     const worker = this.data.agents.find((a) => a.task === task.id && a.role === "worker");
-    const st = this.sheepStatus(task, worker);
-    const fam = this.famKey(worker, task.agent), sc = o.sc, sz = 16 * sc, h = hash(task.id);
-    const name = (pose, dir) => `sheep-${fam}-${pose}${dir === "l" ? "-l" : ""}`;
+    const st = this.sheepStatus(task, worker), act = o.act;
+    const fam = act?.fam || this.famKey(worker, task.agent), sc = o.sc, W0 = this.dim("sheep").w, sz = W0 * sc, h = hash(task.id);
+    const art = (pose, dir) => this.art("sheep", fam, pose, dir);
     const face = (h >> 2) % 3 === 0 ? "l" : "r";
     const age = duration(Date.now() / 1000 - seconds(task.updated || task.created));
     const note = st === "sleep" ? "out of capacity" : st === "alert" ? "needs attention" : st === "gone" ? "gone" : "";
-    const tip = [`${task.id} · ${task.title || ""}`, `${task.agent || "unassigned"}${task.model ? ` / ${task.model}` : ""}`,
+    const tip = [`${task.id} · ${task.title || ""}${task.size ? ` · size ${String(task.size).toUpperCase()}` : ""}`, `${task.agent || "unassigned"}${task.model ? ` / ${task.model}` : ""}`,
       `machine ${task.machine || worker?.machine || "—"}`, `${task.state}${note ? ` · ${note}` : ""} · ${age}`,
       "Click for details and actions"].filter(Boolean).join("\n");
     const box = () => div().relative().w(sz).h(sz).flex_none();
     let body, spacer = null;
-    if (o.trot) body = box().child(flip(name("walk1", o.trot), name("walk2", o.trot), 16, 16, sc, 260));
+    if (act?.pose) {
+      // Scene pose: stands on the sheep's feet, lambs are smaller; walking flips two frames natively.
+      const kind = act.lamb ? "lamb" : "sheep", d = act.dir || "r", poses = act.pose === "walk" ? ["walk1", "walk2"] : [act.pose];
+      const f = this.fig(kind, fam, poses, d, sc, 260), dm = this.art(kind, fam, poses[0], d);
+      body = box().child(div().absolute().left(Math.round((sz - dm.w * sc) / 2)).top(sz - dm.h * sc).child(f));
+    } else if (o.trot) body = box().child(this.fig("sheep", fam, ["walk1", "walk2"], o.trot, sc, 260));
     else if (st === "walk" && o.path) {
       // Walk right, graze (looking up now and then), walk back left, graze. Rotated per sheep so the flock is out of step.
       const n = o.path, g = 10 + (h >> 4) % 9, seq = [];
@@ -940,16 +1165,16 @@ export default class MissionDashboard extends View {
         return div().absolute().left(0).top(0).w(sz).h(sz).overflow_hidden()
           .child(h_flex().absolute().left(0).top(0).w(sz * 3).h(sz).items_start()
             .child(text(frames.map(([, p, d]) => `${p}|${d}` === v ? "" : HID)))
-            .child(spr(name(pose, dir), 16, 16, sc)));
+            .child(this.fig("sheep", fam, [pose], dir, sc)));
       }));
     } else {
       const pose = st === "gone" || st === "walk" ? "sit" : st;
       body = box().child(div().absolute().left(0).top(0)
         .when(st === "alert", (el) => el.loop("top", { from: 0, to: -3 * sc, period: 560, easing: "ease-out" }))
-        .child(spr(name(pose, face), 16, 16, sc))
-        .children(st === "alert" ? [div().absolute().left(face === "l" ? 15 * sc : -7 * sc).top(3 * sc)
+        .child(this.fig("sheep", fam, [pose], face, sc))
+        .children(st === "alert" ? [div().absolute().left(face === "l" ? (W0 - 1) * sc : -7 * sc).top(3 * sc)
           .child(spr("bubble-alert", 8, 8, sc))] : []))
-        .children(st === "sleep" ? [div().absolute().right(face === "l" ? 15 * sc : -7 * sc).top(-sc)
+        .children(st === "sleep" ? [div().absolute().right(face === "l" ? (W0 - 1) * sc : -7 * sc).top(-sc)
           .loop("opacity", { from: 0.25, to: 1, period: 1800 }).child(spr("zzz", 8, 8, sc))] : []);
     }
     const col = v_flex().w(sz).flex_none().items_center().gap(1).child(body)
@@ -960,10 +1185,10 @@ export default class MissionDashboard extends View {
         .hover((s) => s.bg("#d9f2dc")).tooltip(`Move ${task.id} off ${task.agent}: ${this.altUsage(task.alternatives[0])}`)
         .on_click((_e, cx) => { cx.stop_propagation(); this.openPanel(task.id, cx); this.move(task, task.alternatives[0], cx); })
         .child(`wake: move to ${this.altLabel(task.alternatives[0])}`)] : []);
-    const motion = { duration: TROT, easing: "ease-in-out" };
+    const motion = { duration: act?.at ? this.stage.move : TROT, easing: act?.at ? "linear" : "ease-in-out" };
     return h_flex().id(`sheep-${task.id}`).absolute().left(x).top(y).items_start()
       .transition("left", motion).transition("top", motion)
-      .opacity(st === "gone" ? 0.45 : 1)
+      .opacity(act?.hide ? 0 : st === "gone" ? 0.45 : 1)
       .children(spacer ? [spacer] : []).child(col)
       .tooltip(tip).cursor_pointer()
       .on_hover((on, cx) => { const id = on ? task.id : this.hovered === task.id ? null : this.hovered; if (id !== this.hovered) { this.hovered = id; cx.notify(); } })
@@ -1009,8 +1234,13 @@ export default class MissionDashboard extends View {
     // pen, meadow and gate spread out in tall panes (sprites keep their integer scale).
     const ky = Math.max(sc, (H - oy - SKY * sc) / (AH - SKY));
     const X = (ax) => ox + ax * sc, Y = (ay) => Math.round(oy + Math.min(ay, SKY) * sc + Math.max(0, ay - SKY) * ky), skyH = Y(SKY);
-    const chW = this.cw10 / 10, sz = 16 * sc;
+    const hs = this.stage, L = layout(this.have.has("barn2-closed")), SHP = this.dim("sheep").w;
+    const chW = this.cw10 / 10, sz = SHP * sc, szOf = (task) => sz * sizeK(task);
     const at = (x, y, c) => div().absolute().left(x).top(y).child(c);
+    const barnX = X(L.barn[0]), barnY = Y(L.barn[1]);
+    // Scene points -> screen pixels (see layout()).
+    const pt = (q) => (typeof q[0] === "string" ? { x: barnX + q[1] * sc, y: barnY + q[2] * sc } : { x: X(q[0]), y: Y(q[1]) });
+    const actors = new Map(); // key -> screen rect of drovers and the dog, for effects and speech bubbles
     const blocks = []; // laid-out rects that speech bubbles must not cover
     const label = (text, x, y) => {
       blocks.push({ x, y, w: text.length * chW * 1.05 + 8, h: 15 });
@@ -1041,18 +1271,36 @@ export default class MissionDashboard extends View {
     // HUD in the sky: plan usage meters and sleeping agents.
     kids.push(h_flex().absolute().left(12).top(Math.max(8, Math.floor(skyH / 2) - 16)).right(16 * sc + 30).gap(6).flex_wrap().children(this.hud()));
 
-    // Drover (coordinator) with a speech bubble.
+    // Drover (coordinator). Idle behaviour follows its state (working: think / read the scroll, idle: lean on the crook,
+    // blocked: alert, out of capacity: doze); a scene can walk it around, or add a second drover (handover).
     const co = d.agents.find((a) => a.role === "coordinator");
     const coTip = co ? `drover · coordinator\n${co.agent || "agent"}${co.model ? ` / ${co.model}` : ""}\nmachine ${co.machine || "—"}\n${co.status}\n${co.msg || ""}`.trim() : "drover (coordinator not connected)";
-    const asleep = this.coordAsleep();
-    kids.push(this.clickable(v_flex().id("drover").absolute().left(X(8)).top(Y(SKY + 6)).items_center().gap(1).opacity(co?.status === "gone" ? 0.45 : asleep ? 0.6 : 1).id("drover").cursor_pointer().on_click((_e, cx) => this.openPanel("coordinator", cx))
-      .child(co?.status === "working" && !asleep ? flip("drover-1", "drover-2", 16, 24, sc, 1100) : spr("drover-1", 16, 24, sc)).child(tag(asleep ? "drover zzz" : "drover")), null, coTip));
-    blocks.push({ x: X(8), y: Y(SKY + 6), w: sz, h: 24 * sc + 14 });
-    const coLines = wrap(asleep ? "zzz… out of capacity" : co?.msg || (m ? `Mission ${m.state}` : "Resting"), 26, 2);
-    const coB = { x: X(8) + sz + 3 * Math.max(2, sc) + 2, y: Y(SKY + 6), w: bubbleW(coLines, chW), lines: coLines, tail: "left" };
-    coB.ty = coB.y + Math.min(bubbleH(coLines) / 2, 5 * sc);
-    blocks.push({ x: coB.x, y: coB.y, w: coB.w, h: bubbleH(coLines) });
-    kids.push(...this.bubble("drover-bubble", coB, sc));
+    const asleep = this.coordAsleep(), dm = this.dim("drover"), coFam = this.famKey(co);
+    const droverEl = (key, ao, fam, home) => {
+      const idle = co?.status === "gone" ? { poses: ["idle1"] } : asleep ? { poses: ["doze"], zzz: true }
+        : co?.status === "blocked" ? { poses: ["idle1", "idle2"], alert: true, period: 700 }
+        : co?.status === "working" ? { poses: ["think", "read"], period: 4000 } : { poses: ["lean"] };
+      const p = pt(ao?.at || home), w = dm.w * sc, mo = { duration: hs.move, easing: "linear" };
+      const poses = ao?.pose ? POSES[ao.pose] || [ao.pose] : idle.poses, calm = !ao?.pose;
+      actors.set(key, { x: p.x, y: p.y, w, h: dm.h * sc });
+      return this.clickable(v_flex().id(key).absolute().left(p.x).top(p.y).items_center().gap(1).transition("left", mo).transition("top", mo)
+        .opacity(co?.status === "gone" ? 0.45 : asleep && calm ? 0.6 : 1).cursor_pointer().on_click((_e, cx) => this.openPanel("coordinator", cx))
+        .child(div().relative().child(this.fig("drover", fam, poses, ao?.dir || "r", sc, ao?.pose === "walk" ? 300 : idle.period || 1100))
+          .children(calm && idle.alert ? [div().absolute().left(w - 4 * sc).top(0).loop("top", { from: 0, to: -3 * sc, period: 560, easing: "ease-out" }).child(spr("bubble-alert", 8, 8, sc))] : [])
+          .children(calm && idle.zzz ? [div().absolute().left(w - 6 * sc).top(-2 * sc).loop("opacity", { from: 0.25, to: 1, period: 1800 }).child(spr("zzz", 8, 8, sc))] : []))
+        .child(tag(asleep && calm ? "drover zzz" : "drover")), null, coTip);
+    };
+    kids.push(droverEl("drover", hs.a.drover, hs.a.drover?.fam || coFam, L.home));
+    if (hs.a.drover2) kids.push(droverEl("drover2", hs.a.drover2, hs.a.drover2.fam, L.edge));
+    const home = pt(L.home);
+    blocks.push({ x: home.x, y: home.y, w: dm.w * sc, h: dm.h * sc + 14 });
+    if (!hs.a.drover?.at && !hs.a.drover2) {
+      const coLines = wrap(asleep ? "zzz… out of capacity" : co?.msg || (m ? `Mission ${m.state}` : "Resting"), 26, 2);
+      const coB = { x: home.x + dm.w * sc + 3 * Math.max(2, sc) + 2, y: home.y, w: bubbleW(coLines, chW), lines: coLines, tail: "left" };
+      coB.ty = coB.y + Math.min(bubbleH(coLines) / 2, 5 * sc);
+      blocks.push({ x: coB.x, y: coB.y, w: coB.w, h: bubbleH(coLines) });
+      kids.push(...this.bubble("drover-bubble", coB, sc));
+    }
 
     // Where each sheep stands. Flocks are scattered organically (seeded by task id) inside each zone;
     // working sheep reserve room for their walking path and everyone in the meadow and gate for a bubble.
@@ -1061,16 +1309,20 @@ export default class MissionDashboard extends View {
     const rest = Math.max(0, H - Y(AH - 4));
     // Pen (queued).
     kids.push(div().absolute().left(X(4)).top(Y(100)).w(96 * sc).h(Y(AH - 4) - Y(100)).bg("#5aa84a66"));
-    for (let i = 0; i < 6; i++) kids.push(at(X(4 + i * 16), Y(92), spr("fence", 16, 16, sc)));
+    const fenceA = this.scn("fence2-h", "fence", 16, 16, 16, 16);
+    for (let i = 0; i < 6; i++) {
+      const g = this.scn(hs.gate.pen ? "gate2-open" : "gate2-closed", hs.gate.pen ? "gate-open" : "gate-closed", 16, 16, 16, 16);
+      kids.push(at(X(4 + i * 16), Y(92), i === 3 ? spr(g.file, 16, 16, sc) : spr(fenceA.file, 16, 16, sc)));
+    }
     const penMax = 8;
     kids.push(label(`PEN · queued${zone.pen.length > penMax ? ` · +${zone.pen.length - penMax}` : ""}`, X(6), Y(86) - 8));
     const pen = zone.pen.slice(0, penMax);
     const waitsOf = (task) => (task.depends_on || []).filter((id) => d.tasks.find((x) => x.id === id)?.state !== "merged");
     flock(pen, { x: X(6), y: Y(104), w: X(98) - X(6), h: Y(AH - 6) - Y(104) + rest },
-      (task) => ({ w: Math.max(sz, 50), h: sz + (waitsOf(task).length ? 30 : 16), top: 0 }), pos);
+      (task) => ({ w: Math.max(szOf(task), 50), h: szOf(task) + (waitsOf(task).length ? 30 : 16), top: 0 }), pos);
     for (const task of pen) {
       const w = waitsOf(task);
-      sheepOpts.set(task.id, { sc, after: w.length ? `after ${w[0]}${w.length > 1 ? "+" : ""}` : "" });
+      sheepOpts.set(task.id, { sc: sc * sizeK(task), after: w.length ? `after ${w[0]}${w.length > 1 ? "+" : ""}` : "" });
     }
 
     // Meadow (working) and gate (review): sheep that talk get room for a bubble above them.
@@ -1082,9 +1334,9 @@ export default class MissionDashboard extends View {
       return { msg: this.sheepMsg(task, worker, st), st };
     };
     const foot = (task, maxW) => {
-      const walk = status(task) === "walk", w = sz + (walk ? PATH * sc : 0);
+      const walk = status(task) === "walk", w = szOf(task) + (walk ? PATH * sc * sizeK(task) : 0);
       const lines = wrap(talker(task).msg, 26, 2);
-      return { w: Math.max(w, Math.min(maxW, lines.length ? bubbleW(lines, chW) * 0.8 : w)), h: sz + 16 + (lines.length ? room : 0), top: lines.length ? room : 0, inner: w };
+      return { w: Math.max(w, Math.min(maxW, lines.length ? bubbleW(lines, chW) * 0.8 : w)), h: szOf(task) + 16 + (lines.length ? room : 0), top: lines.length ? room : 0, inner: w };
     };
     const meadowMax = 9, gateMax = 6;
     kids.push(label(`MEADOW · working${zone.meadow.length > meadowMax ? ` · +${zone.meadow.length - meadowMax}` : ""}`, X(108), skyH + 6));
@@ -1096,7 +1348,7 @@ export default class MissionDashboard extends View {
     const GR = { x: X(240), y: skyH + 22, w: X(302) - X(240), h: Y(AH - 4) - skyH - 22 };
     flock(gate, GR, (task) => foot(task, GR.w), pos);
     for (const task of [...meadow, ...gate]) {
-      sheepOpts.set(task.id, { sc, path: status(task) === "walk" ? PATH : 0 });
+      sheepOpts.set(task.id, { sc: sc * sizeK(task), path: status(task) === "walk" ? PATH : 0 });
       const { msg, st } = talker(task);
       if (msg) talk.push({ task, msg, alert: st === "alert" });
     }
@@ -1107,42 +1359,53 @@ export default class MissionDashboard extends View {
         .child(div().px(12).py(7).rounded(8).bg("#00000038").text_color("#ffffff").text_size(13).font_semibold().whitespace_normal().text_center().child(line)));
     }
 
-    // Gate with the sheepdog (review).
-    const open = zone.gate.length + zone.past.length > 0;
-    kids.push(at(X(222), Y(92), spr(open ? "gate-open" : "gate-closed", 16, 16, sc)));
+    // Gate with the sheepdog (review): the gate opens for the scenes, else while sheep are there.
+    const open = hs.gate.rev ?? zone.gate.length + zone.past.length > 0;
+    const gA = this.scn(open ? "gate2-open" : "gate2-closed", open ? "gate-open" : "gate-closed", 16, 16, 16, 16);
+    kids.push(at(X(L.reviewGate[0]), Y(L.reviewGate[1]), spr(gA.file, 16, 16, sc)));
     const rev = d.agents.filter((a) => a.role === "reviewer"), dogA = rev[rev.length - 1];
-    kids.push(this.clickable(v_flex().id("dog").absolute().left(X(220)).top(Y(116)).items_center().gap(1).opacity(dogA?.status === "gone" ? 0.45 : 1)
-      .child(dogA?.status === "working" ? flip("dog-1", "dog-2", 16, 12, sc, 500) : spr("dog-1", 16, 12, sc)).child(tag(dogA ? dogA.who : "dog")),
+    const dg = hs.a.dog, dd = this.dim("dog"), dp = pt(dg?.at || L.dog), dmo = { duration: hs.move, easing: "linear" };
+    actors.set("dog", { x: dp.x, y: dp.y, w: dd.w * sc, h: dd.h * sc });
+    kids.push(this.clickable(v_flex().id("dog").absolute().left(dp.x).top(dp.y).items_center().gap(1).transition("left", dmo).transition("top", dmo)
+      .opacity(dogA?.status === "gone" ? 0.45 : 1)
+      .child(this.fig("dog", "other", dg?.pose ? POSES[dg.pose] || [dg.pose] : dogA?.status === "working" ? ["wag1", "wag2"] : ["sit"], dg?.dir || "r", sc, dg?.pose === "run" ? 260 : 600))
+      .child(tag(dogA ? dogA.who : "dog")),
       dogA, dogA ? `${dogA.who} · reviewer\n${dogA.agent || "agent"}${dogA.model ? ` / ${dogA.model}` : ""}\nmachine ${dogA.machine || "—"}\n${dogA.status}\n${dogA.msg || ""}`.trim() : "Sheepdog · no reviewer right now"));
-    blocks.push({ x: X(220), y: Y(116), w: sz, h: 12 * sc + 14 }, { x: X(222), y: Y(92), w: sz, h: sz });
+    blocks.push({ x: dp.x, y: dp.y, w: dd.w * sc, h: dd.h * sc + 14 }, { x: X(L.reviewGate[0]), y: Y(L.reviewGate[1]), w: 16 * sc, h: 16 * sc });
 
-    // Barn with the merged sheep sitting at its foot; approved sheep wait below them.
-    const barnY = Y(SKY + 2);
-    kids.push(at(X(306), barnY, spr("barn", 48, 40, sc)));
-    blocks.push({ x: X(306), y: barnY, w: 48 * sc, h: 40 * sc });
-    const ms = Math.max(2, sc - 1), per = Math.max(1, Math.floor(58 * sc / (16 * ms + 2)));
-    const mergedY = barnY + 42 * sc, mergedRows = Math.max(1, Math.ceil(Math.min(zone.barn.length, per * 2) / per));
+    // Barn (door opens for the merge scene) with the merged sheep sitting at its foot and hay bales beside it; approved sheep wait below.
+    const bA = this.scn(hs.barn ? "barn2-open" : "barn2-closed", "barn", 64, 56, 48, 40), bh = L.barn[3];
+    kids.push(at(barnX, barnY, spr(bA.file, bA.w, bA.h, sc)));
+    blocks.push({ x: barnX, y: barnY, w: L.barn[2] * sc, h: bh * sc });
+    const hay = Math.min(6, zone.barn.filter((k) => !this.pendingMerge.has(k.id)).length);
+    for (let i = 0; i < hay; i++) {
+      const hx = barnX - (i % 3 + 1) * 13 * sc, hy = barnY + (bh - 10) * sc - Math.floor(i / 3) * 9 * sc;
+      kids.push(at(hx, hy, this.have.has("hay") ? spr("hay", 12, 10, sc) : div().w(11 * sc).h(8 * sc).rounded(2).bg("#d9b44a").border(1).border_color("#a98728")));
+    }
+    const ms = Math.max(2, sc - 1), per = Math.max(1, Math.floor(58 * sc / (SHP * ms + 2)));
+    const mergedY = barnY + (bh + 2) * sc, mergedRows = Math.max(1, Math.ceil(Math.min(zone.barn.length, per * 2) / per));
     zone.barn.slice(0, per * 2).forEach((task, i) => {
-      pos.set(task.id, { x: X(300) + (i % per) * (16 * ms + 2), y: mergedY + Math.floor(i / per) * (16 * ms + 2) });
+      pos.set(task.id, { x: X(L.barn[0] - 6) + (i % per) * (SHP * ms + 2), y: mergedY + Math.floor(i / per) * (SHP * ms + 2) });
       sheepOpts.set(task.id, { sc: ms, tag: false });
     });
-    kids.push(label(zone.barn.length ? `merged ×${zone.barn.length}` : "barn · nothing merged yet", X(302), mergedY + mergedRows * (16 * ms + 2)));
-    const pastY = Math.max(Y(96), mergedY + mergedRows * (16 * ms + 2) + 22);
-    kids.push(label(`APPROVED${zone.past.length > 2 ? ` · +${zone.past.length - 2}` : ""}`, X(302), pastY));
-    zone.past.slice(0, 2).forEach((task, i) => { pos.set(task.id, { x: X(300 + i * 29), y: pastY + 16 }); sheepOpts.set(task.id, { sc }); });
+    kids.push(label(zone.barn.length ? `merged ×${zone.barn.length}` : "barn · nothing merged yet", X(L.barn[0] - 4), mergedY + mergedRows * (SHP * ms + 2)));
+    const pastY = Math.max(Y(96), mergedY + mergedRows * (SHP * ms + 2) + 22);
+    kids.push(label(`APPROVED${zone.past.length > 2 ? ` · +${zone.past.length - 2}` : ""}`, X(L.barn[0] - 4), pastY));
+    zone.past.slice(0, 2).forEach((task, i) => { pos.set(task.id, { x: X(L.past[0] + i * 29), y: pastY + 16 }); sheepOpts.set(task.id, { sc: sc * sizeK(task) }); });
 
     // Sheep, noting which ones just changed spot so they trot (facing their way) instead of sliding.
     const now = Date.now();
     if (now >= this.trotUntil) this.trot.clear();
     const sheepRects = new Map();
-    if (this.size) for (const [id, p] of pos) {
-      const task = d.tasks.find((k) => k.id === id), o = sheepOpts.get(id);
-      const prev = this.pos.get(id);
-      if (prev && now < this.trotUntil && Math.hypot(p.x - prev.x, p.y - prev.y) > 4) this.trot.set(id, p.x < prev.x ? "l" : "r");
+    if (this.size) for (const [id, p0] of pos) {
+      const task = d.tasks.find((k) => k.id === id), o = sheepOpts.get(id), act = hs.a[`s:${id}`];
+      if ((this.pending.has(id) || this.pendingMerge.has(id)) && !act) continue; // not arrived yet: its scene brings it
+      const p = act?.at ? pt(act.at) : p0, prev = this.pos.get(id);
+      if (!act?.at && prev && now < this.trotUntil && Math.hypot(p.x - prev.x, p.y - prev.y) > 4) this.trot.set(id, p.x < prev.x ? "l" : "r");
       this.pos.set(id, p);
-      kids.push(this.sheep(t, task, p.x, p.y, { ...o, trot: this.trot.get(id) }));
-      const s = 16 * o.sc;
-      sheepRects.set(id, { x: p.x, y: p.y, w: s + (o.path || 0) * o.sc, h: s + (o.tag === false ? 0 : 15) });
+      kids.push(this.sheep(t, task, p.x, p.y, { ...o, trot: act?.at ? undefined : this.trot.get(id), act }));
+      const s = SHP * o.sc;
+      sheepRects.set(id, { x: p.x, y: p.y, w: s + (o.path || 0) * o.sc, h: s + (o.tag === false ? 0 : 15), sp: s });
     }
 
     // Speech bubbles: up to two wrapped lines, placed so they never cover each other, labels or other sheep.
@@ -1177,8 +1440,8 @@ export default class MissionDashboard extends View {
     let full = null;
     for (const { task, msg, alert } of talk) {
       const S = sheepRects.get(task.id);
-      if (!S || this.trot.has(task.id)) continue; // the bubble waits until the sheep has arrived
-      const S2 = { ...S, h: 16 * sc };
+      if (!S || this.trot.has(task.id) || hs.a[`s:${task.id}`]?.at || hs.a[`s:${task.id}`]?.msg) continue; // the bubble waits until the sheep has arrived
+      const S2 = { ...S, h: S.sp };
       if (task.id === focus) {
         const lines = wrap(msg, 34, 10), bw = bubbleW(lines, chW), bh = bubbleH(lines);
         const above = S2.y - tailH - bh >= skyH + 4;
@@ -1193,6 +1456,22 @@ export default class MissionDashboard extends View {
       kids.push(...this.bubble(`bubble-${task.id}`, { ...b, lines, alert }, sc));
     }
     if (full) kids.push(...this.bubble("bubble-full", full, sc, true));
+
+    // Scene effects float up from an actor or a spot; scene speech bubbles sit above their speaker.
+    for (const f of hs.fx) {
+      const r = f.on ? (f.on.startsWith("s:") ? sheepRects.get(f.on.slice(2)) : actors.get(f.on)) : null;
+      const q = f.at ? pt(f.at) : r ? { x: r.x + (r.sp || r.w) / 2 - 4 * sc, y: r.y - 8 * sc } : null;
+      if (q) kids.push(div().absolute().left(Math.round(q.x)).top(Math.round(q.y))
+        .loop("top", { from: Math.round(q.y), to: Math.round(q.y - 8 * sc), period: 900, easing: "ease-out" }).child(this.fxEl(f.k, sc)));
+    }
+    for (const [key, a] of Object.entries(hs.a)) {
+      const r = a.msg ? (key.startsWith("s:") ? sheepRects.get(key.slice(2)) : actors.get(key)) : null;
+      if (!r) continue;
+      const lines = wrap(a.msg, 22, 2), bw = bubbleW(lines, chW), bh = bubbleH(lines), mid = r.x + (r.sp || r.w) / 2;
+      const x = Math.round(Math.max(4, Math.min(W - bw - 4, mid - bw / 2)));
+      kids.push(...this.bubble(`say-${key}`, { x, y: Math.max(4, r.y - tailH - bh), w: bw, lines, tail: "down", stalk: 0,
+        tx: Math.max(x + 6 + 3 * p, Math.min(x + bw - 6 - 3 * p, mid)) }, sc, true));
+    }
 
     return div().id("pasture").relative().w_full().when(fill, (el) => el.flex_1().min_h(AH * 2)).when(!fill, (el) => el.flex_none().h(H))
       .rounded(12).overflow_hidden().border(1).border_color(t.border)
