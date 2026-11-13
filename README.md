@@ -26,11 +26,14 @@ runs on machines that stay on, and cleans up once the work is merged.
 | 🐑 **Quota-aware** | Reads each agent's plan usage, skips agents that are out, prefers ones with headroom. |
 | 🐕 **Watcher** | Moves stuck or out-of-capacity tasks to the next choice; restarts a dead coordinator. |
 | 🔁 **Handover** | Right-click a coordinator (or click the drover) to hand it to another agent, with its missions and your last message. |
-| 📊 **Pasture** | Per project: a live meadow of sheep (tasks), sheepdog (reviewer) and barn (merged). |
+| 📊 **Pasture** | Per project: a live pixel farm. Sheep are tasks, the sheepdog reviews, merged work goes to the barn; day and night follow your clock. Pop it out into its own window. |
 
 <p align="center">
-  <img src="docs/pasture.png" alt="The drover pasture in demo mode" width="49%">
-  <img src="docs/panel.png" alt="A sheep's panel with its Move to… picker, in demo mode" width="49%">
+  <img src="docs/pasture-day.png" alt="The drover pasture by day, in demo mode" width="49%">
+  <img src="docs/pasture-night.png" alt="The drover pasture at night, in demo mode" width="49%">
+</p>
+<p align="center">
+  <img src="docs/panel.png" alt="A sheep's panel with its Move to… picker, in demo mode" width="60%">
 </p>
 
 ```mermaid
@@ -102,6 +105,7 @@ drover task merge t1                         # merge, then remove branch + workt
 drover task drop t2 "redone in t3"           # abandon without merging
 drover say coordinator "question"            # logged message between agents
 drover dashboard --repo ~/Work/app --json    # flow, tokens, impediments
+drover dashboard --repo ~/Work/app --window  # the pasture in its own window
 ```
 
 - **One coordinator per project.** Later missions for the same repo reuse it; workers and
@@ -127,10 +131,13 @@ drover dashboard --repo ~/Work/app --json    # flow, tokens, impediments
   `drover peek` keep agents from re-reading the repo.
 - **Merge conflicts:** when base moved, drover merges it into the task branch first, resolves
   safe conflicts (`auto_union` files keep both sides), tests, then merges.
-- **Dashboard:** `ctrl-shift-d`, the strip's **Dashboard** chip, **Open dashboard** on the
-  project home, a mission row there, or right-click a project in the rail. `Esc` closes it.
-  Sheep are tasks (sleeping = out of capacity, with a wake button), the sheepdog reviews, merged
-  work goes to the barn. Click a sheep for its terminal, actions and **Move to…** another agent.
+- **Dashboard:** the strip's **Dashboard** chip, **Open dashboard** on the project home, or
+  right-click a project in the rail opens the project's pasture tab; `ctrl-shift-d` is a quick
+  look. **Pop out** (or `drover dashboard --window`) gives it its own window to drag anywhere
+  (on Hyprland, float it with Super+T).
+  Sheep are tasks (sleeping = out of capacity, with a wake button), the sheepdog herds them to
+  review, merged work goes to the barn, and events play as little scenes. Click a sheep for its
+  terminal, actions and **Move to…** another agent; click the drover to hand over the coordinator.
 - **Archive:** done missions auto-hide after `missions.archive_after_days` (default 7).
 
 Agents on a machine get folder trust pre-accepted for Codex, Claude and Cursor
