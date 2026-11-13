@@ -33,7 +33,7 @@ runs on machines that stay on, and cleans up once the work is merged.
   <img src="docs/pasture-night.png" alt="The drover pasture at night, in demo mode" width="49%">
 </p>
 <p align="center">
-  <img src="docs/panel.png" alt="A sheep's panel with its Move to… picker, in demo mode" width="60%">
+  <img src="docs/pasture-panel.png" alt="A sheep's panel with its Move to… picker, in demo mode" width="60%">
 </p>
 
 ```mermaid
