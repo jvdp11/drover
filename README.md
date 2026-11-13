@@ -9,7 +9,7 @@
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 ![Linux / Omarchy](https://img.shields.io/badge/Linux-Omarchy-1793d1?logo=archlinux&logoColor=white)
-![Herdr](https://img.shields.io/badge/Herdr-app-e8833a)
+[![Herdr layout](https://img.shields.io/badge/Herdr-layout-e8833a)](https://herdr.dev/layouts)
 
 </div>
 
@@ -57,9 +57,17 @@ Then press `ctrl-shift-l` in Herdr until the drover layout shows. After editing 
 switch layouts twice to reload. Settings: `~/.config/drover/config.json` (the gear on the left rail
 opens the settings dialog); probe cache: `~/.local/state/drover/fleet.json`.
 
-**Herdr gallery:** `herdr/` is a shareable Herdr layout (layout, mods,
-[RECIPE.md](herdr/RECIPE.md), preview). Installed from the gallery it still needs this repo's
-engine: clone it and run `./install.sh`.
+### From the Herdr gallery
+
+drover is also a shareable [Herdr layout](https://herdr.dev/layouts): `herdr/` holds the layout,
+its mods, a [RECIPE.md](herdr/RECIPE.md) and a preview. Tell your agent:
+
+```text
+Read ~/.config/herdr-app/AGENTS.md, then add this layout: https://github.com/jvdp11/drover/tree/main/herdr
+```
+
+The mods drive the drover engine, so a gallery install still needs this repo: clone it and run
+`./install.sh` (the recipe tells your agent the same).
 
 ## Commands
 
