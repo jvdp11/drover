@@ -3,7 +3,7 @@
 //   props: { folder, name, space, mission } });
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { exec, theme, props, closeOverlay, run, shared, machines, panes, spaces, notify, appHome } from "herdr";
+import { exec, theme, props, closeOverlay, run, shared, machines, panes, spaces, notify, playSound } from "herdr";
 // Show an agent's terminal: focus its pane (switching space/tab first); with no pane, peek it.
 function showTerminal(terminal) {
   const pane = panes().find((p) => p.terminal === terminal);
@@ -35,22 +35,37 @@ const flip = (a, b, w, h, sc, period = 700) => div().relative().w(w * sc).h(h * 
   .child(div().absolute().left(0).top(0).loop("opacity", { from: 9, to: -8, period, easing: "linear" }).child(spr(a, w, h, sc)))
   .child(div().absolute().left(0).top(0).loop("opacity", { from: -8, to: 9, period, easing: "linear" }).child(spr(b, w, h, sc)));
 // Pasture motion: zone changes trot over TROT ms; walking paths step every STEP_MS.
-const TROT = 1600, STEP_MS = 110, LINE = 13;
+const TROT = 1600, STEP_MS = 110, LINE = 13, OWL_FLY = 4500;
 
 // --- Events and actors ---
 // Task size S/M/L draws the same sheep at 0.8x / 1x / 1.2x.
 const sizeK = (task) => ({ S: 0.8, M: 1, L: 1.2 })[String(task?.size || "M")[0].toUpperCase()] || 1;
-// Sprite contract v2 names fall back to the v1 files while a v2 file is missing (see MissionDashboard.art).
-const V1P = { walk3: "walk1", walk4: "walk2", graze1: "graze", graze2: "graze", stuck: "alert" };
+// Older pose names map onto sprite contract v2.
 const V2P = { walk2: "walk3", graze: "graze1" };
 const POSES = { walk: ["walk1", "walk2"], run: ["run1", "run2"], idle: ["idle1", "idle2"], wag: ["wag1", "wag2"] };
-// Effects without a sprite yet are drawn as a coloured glyph.
-const GLYPH = { heart: ["♥", "#e0476b"], confetti1: ["✦", "#f2b632"], confetti2: ["✺", "#4f9be0"], sparkle1: ["✦", "#ffe36a"], sparkle2: ["✧", "#fff1a8"], note: ["♪", "#25303a"] };
+// Three-frame loop a, b, c, b, a, run natively: nested opacity loops of one period keep only the frame
+// whose third of the swing is current (opacities multiply, so b shows only between both thresholds).
+const flip3 = (a, b, c, w, h, sc, period = 900) => {
+  const k = (from, to, el) => div().absolute().left(0).top(0).loop("opacity", { from, to, period, easing: "linear" }).child(el);
+  return div().relative().w(w * sc).h(h * sc).flex_none()
+    .child(k(5, -11, spr(a, w, h, sc)))
+    .child(k(-5, 11, k(11, -5, spr(b, w, h, sc))))
+    .child(k(-11, 5, spr(c, w, h, sc)));
+};
+// Sounds (off by default, header toggle). Synthesized for this mod by sounds/make_sounds.py, CC0 1.0.
+const SOUND = { bleat: "mods/drover-dashboard/sounds/bleat.mp3", chime: "mods/drover-dashboard/sounds/chime.mp3" };
+// Per-viewer settings (this mod copy's localStorage): time of day "auto" | "day" | "night", sound on/off.
+const store = { get(k, d) { try { return localStorage.getItem(`pasture.${k}`) ?? d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(`pasture.${k}`, String(v)); } catch { /* not remembered */ } } };
+// Local clock: dawn 6-8, day 8-18, dusk 18-20, night 20-6.
+const clockPhase = (h = new Date().getHours()) => (h >= 6 && h < 8 ? "dawn" : h >= 8 && h < 18 ? "day" : h >= 18 && h < 20 ? "dusk" : "night");
+const TINT = { dawn: "#ffb46a2e", dusk: "#ff7a2a40", night: "#101a5a8c" };
+const SKYC = { day: "#9fd8f2", dawn: "#f4c7a4", dusk: "#f0a070", night: "#24306a" };
 // Where scenes happen: ONE place for every named anchor, in art pixels (top-left of the figure standing there).
 // A point is [ax, ay] on the pasture grid, or ["barn", dx, dy] relative to the barn's top-left.
 // Other layers (scenery, weather, night) should place things through these names too.
-function layout(v2) {
-  const bw = v2 ? 64 : 48, bh = v2 ? 56 : 40, bx = v2 ? 296 : 306;
+function layout() {
+  const bw = 64, bh = 56, bx = 296;
   return {
     home: [8, SKY + 6],         // where the drover stands
     edge: [-34, SKY + 6],       // just off the left of the pasture: drovers walk in and out here
@@ -59,7 +74,7 @@ function layout(v2) {
     meadow: [150, 66],          // middle of the meadow
     reviewGate: [222, 92],      // gate between meadow and review area
     reviewZone: [250, 104],     // where a sheep waits in review
-    dog: [220, 116],            // the sheepdog's spot
+    dog: [234, 136],            // the sheepdog's spot, just inside the review side of the fence
     past: [300, 100],           // approved sheep wait here
     barn: [bx, SKY + 2, bw, bh], // x, y, w, h
     barnDoor: ["barn", bw / 2 - 12, bh - 26],
@@ -95,7 +110,7 @@ const rectGap = (a, b) => Math.max(b.x - (a.x + a.w), a.x - (b.x + b.w), b.y - (
 // Loose flock inside rect R: each sheep (in order) takes the best of a few candidates seeded by its id,
 // keeping clear of the others (spacing grows when there is room) while drawn to the middle.
 // foot(task) -> { w, h, top, inner }: reserved box, sheep sits `top` px down, centred if `inner` < w.
-function flock(tasks, R, foot, out) {
+function flock(tasks, R, foot, out, avoid = []) {
   const placed = [], feet = tasks.map(foot);
   const avg = feet.reduce((s, f) => s + f.w * f.h, 0) / Math.max(1, feet.length);
   const want = Math.max(6, Math.min(60, Math.sqrt(R.w * R.h / Math.max(1, tasks.length)) - Math.sqrt(avg)));
@@ -107,7 +122,7 @@ function flock(tasks, R, foot, out) {
     for (let k = 0; k < 28; k++) {
       const r = { x: R.x + (rnd() + rnd()) / 2 * Math.max(0, R.w - f.w), y: R.y + (rnd() + rnd()) / 2 * Math.max(0, R.h - f.h), w: f.w, h: f.h };
       const gap = placed.reduce((g, q) => Math.min(g, rectGap(r, q)), Infinity);
-      const v = Math.min(gap, want) - 0.06 * Math.hypot(r.x + f.w / 2 - mx, r.y + f.h / 2 - my);
+      const v = Math.min(gap, want) - 0.06 * Math.hypot(r.x + f.w / 2 - mx, r.y + f.h / 2 - my) - 0.05 * avoid.reduce((s, q) => s + area(r, q, 3), 0);
       if (v > score) { score = v; best = r; }
     }
     placed.push(best);
@@ -301,19 +316,16 @@ export default class MissionDashboard extends View {
     this.sayInput = InputState.new({ placeholder: "Say something to this agent…" });
     // Demo only: props.panel opens that sheep's panel at start, props.move also opens its "Move to…" picker.
     { const p = props() || {}; if (p.demo && p.panel) { this.panel = p.panel; this.moveOpen = !!p.move; } }
-    // Events and actors: queued scenes play one at a time on `stage`. `have` lists the sprite files that exist.
-    this.have = new Set(); this.queue = []; this.playing = false; this.last = null;
+    // Events and actors: queued scenes play one at a time on `stage`.
+    this.queue = []; this.playing = false; this.last = null;
     this.pending = new Set(); this.pendingMerge = new Set();
-    this.stage = newStage(layout(false));
+    this.stage = newStage(layout());
     this.replay = !!(props()?.demo && props()?.events);
-    cx.spawn(async (cx) => {
-      try {
-        const r = await exec("ls", [`${appHome()}/${SPR}`]);
-        this.have = new Set(String(r.stdout || "").split("\n").map((n) => n.replace(/\.svg$/, "")).filter(Boolean));
-        cx.notify();
-      } catch { /* v1 names stay in use */ }
-    });
-    cx.timer.every(POLL_MS, (cx) => this.load(cx));
+    // World: time of day and sound are remembered per viewer; the owl flies at night.
+    this.timeMode = store.get("time", "auto"); this.sound = store.get("sound", "off") === "on";
+    this.phase = this.timeOfDay(); this.owl = null; this.perches = [];
+    this.tick(cx);
+    cx.timer.every(POLL_MS, (cx) => { this.load(cx); this.tick(cx); });
     cx.timer.every(2000, (cx) => this.peek(cx));
   }
 
@@ -383,15 +395,13 @@ export default class MissionDashboard extends View {
     cx.timer.after(TROT + 120, (cx) => cx.notify());
   }
 
-  // --- sprite lookup: contract v2 names, else the v1 files ---
+  // --- sprite lookup (contract v2) ---
   art(kind, fam, pose, dir) {
-    const l = dir === "l" ? "-l" : "", has = (n) => this.have.has(n), f1 = fam === "google" ? "other" : fam;
-    let a;
-    if (kind === "sheep") return has(a = `sheep2-${fam}-${V2P[pose] || pose}${l}`) ? { file: a, w: 24, h: 24 } : { file: `sheep-${f1}-${V1P[pose] || pose}${l}`, w: 16, h: 16 };
-    if (kind === "lamb") return has(a = `sheep2-lamb-${pose}${l}`) ? { file: a, w: 16, h: 16 } : { file: `sheep-other-${pose}${l}`, w: 16, h: 16 };
-    if (kind === "drover") return has(a = `drover2-${fam}-${pose}${l}`) ? { file: a, w: 24, h: 32 }
-      : { file: `drover-${["idle2", "walk2", "walk4", "read", "doze"].includes(pose) ? 2 : 1}`, w: 16, h: 24 };
-    return has(a = `dog2-${pose}${l}`) ? { file: a, w: 24, h: 18 } : { file: `dog-${["run2", "run4", "wag2"].includes(pose) ? 2 : 1}`, w: 16, h: 12 };
+    const l = dir === "l" ? "-l" : "";
+    if (kind === "sheep") return { file: `sheep2-${fam}-${V2P[pose] || pose}${l}`, w: 24, h: 24 };
+    if (kind === "lamb") return { file: `sheep2-lamb-${pose}${l}`, w: 16, h: 16 };
+    if (kind === "drover") return { file: `drover2-${fam}-${pose}${l}`, w: 24, h: 32 };
+    return { file: `dog2-${pose}${l}`, w: 24, h: 18 };
   }
 
   dim(kind) { return this.art(kind, "other", { sheep: "sit", lamb: "walk1", drover: "idle1", dog: "sit" }[kind], "r"); }
@@ -402,14 +412,54 @@ export default class MissionDashboard extends View {
     return a.length > 1 && a[0].file !== a[1].file ? flip(a[0].file, a[1].file, a[0].w, a[0].h, sc, period) : spr(a[0].file, a[0].w, a[0].h, sc);
   }
 
-  // Scenery with a fallback: { file, w, h }.
-  scn(v2, v1, w2, h2, w1, h1) { return this.have.has(v2) ? { file: v2, w: w2, h: h2 } : { file: v1, w: w1, h: h1 }; }
-
-  fxEl(k, sc) {
-    const g = GLYPH[k];
-    return this.have.has(k) || !g ? spr(k, 8, 8, sc)
-      : div().w(8 * sc).h(8 * sc).flex().items_center().justify_center().text_size(7 * sc).font_semibold().text_color(g[1]).child(g[0]);
+  // --- world: time of day, weather, the owl ---
+  // "dawn" | "day" | "dusk" | "night": demo props.time forces it, else the header toggle, else the local clock.
+  timeOfDay() {
+    const p = props() || {};
+    if (p.demo && SKYC[p.time]) return p.time;
+    return this.timeMode === "day" ? "day" : this.timeMode === "night" ? "night" : clockPhase();
   }
+
+  setTimeMode(mode, cx) { this.timeMode = mode; store.set("time", mode); this.tick(cx); cx.notify(); }
+
+  toggleSound(cx) { this.sound = !this.sound; store.set("sound", this.sound ? "on" : "off"); if (this.sound) playSound(SOUND.bleat); cx.notify(); }
+
+  // Every poll: redraw when the time of day turns; at night start the owl's round.
+  tick(cx) {
+    const ph = this.timeOfDay();
+    if (ph !== this.phase) { this.phase = ph; cx.notify(); }
+    if (ph === "night" && !this.owl) {
+      this.owl = { st: props()?.demo && props()?.owl === "perch" ? "perch" : "away", n: 0 };
+      if (this.owl.st === "away") cx.timer.after(1200, (cx) => this.owlStep(cx));
+    }
+  }
+
+  // The owl: waits off the left edge, flies in to a perch (a tree or the barn roof), sits a while, flies off right.
+  owlStep(cx) {
+    const o = this.owl;
+    if (!o) return;
+    if (this.timeOfDay() !== "night") { this.owl = null; cx.notify(); return; }
+    const next = { away: ["in", OWL_FLY], in: ["perch", 26000], perch: ["out", OWL_FLY], out: ["away", 30000] }[o.st];
+    this.owl = { st: next[0], n: o.st === "out" ? o.n + 1 : o.n };
+    cx.notify();
+    cx.timer.after(next[1], (cx) => this.owlStep(cx));
+  }
+
+  // clear | cloudy (an agent this mission uses is at 70%+) | overcast (90%+) | rain (one is out) | rainbow (all merged).
+  weather() {
+    const d = this.data, m = d.mission, p = props() || {};
+    if (p.demo && p.weather) return p.weather;
+    if (!m) return "clear";
+    const tasks = d.tasks.filter((k) => k.state !== "dropped");
+    if (tasks.length && tasks.every((k) => k.state === "merged")) return "rainbow";
+    const used = new Set([...d.agents.filter((a) => a.status !== "gone").map((a) => a.agent),
+      ...tasks.filter((k) => ACTIVE.includes(k.state)).map((k) => k.agent)].filter(Boolean));
+    if ((d.capacity || []).some((c) => used.has(c.agent))) return "rain";
+    const pct = Math.max(0, ...this.usageRows().filter((u) => used.has(u.agent)).map((u) => Number(u.used_percent ?? u.pct)));
+    return pct >= 90 ? "overcast" : pct >= 70 ? "cloudy" : "clear";
+  }
+
+  fxEl(k, sc) { return spr(k, 8, 8, sc); }
 
   // --- event layer: diff each snapshot against the last, queue short scenes, play them in order ---
   snap(d) {
@@ -467,7 +517,8 @@ export default class MissionDashboard extends View {
     const sc = this.queue.shift();
     if (!sc) return;
     this.playing = true;
-    const L = layout(this.have.has("barn2-closed")), S = this.stage = newStage(L);
+    if (this.sound && (sc.ev.k === "done" || sc.ev.k === "merge")) playSound(sc.ev.k === "done" ? SOUND.bleat : SOUND.chime);
+    const L = layout(), S = this.stage = newStage(L);
     // Sheep scenes end with a trot to the settled place, so the tail waits for it.
     const steps = [...sc.steps, [sc.ev.id ? TROT + 120 : 250, () => {
       this.pending.delete(sc.ev.id); this.pendingMerge.delete(sc.ev.id);
@@ -493,7 +544,7 @@ export default class MissionDashboard extends View {
 
   // Scene scripts: [ms, fn(stage)] steps. Walking steps last as long as the walk (stage.move drives the native transition).
   build(e) {
-    const L = layout(this.have.has("barn2-closed")), k = `s:${e.id}`, M = L.meadow, G = L.reviewGate, Z = L.reviewZone;
+    const L = layout(), k = `s:${e.id}`, M = L.meadow, G = L.reviewGate, Z = L.reviewZone;
     const W = { pose: "walk" }, at = (p, dx, dy) => (typeof p[0] === "string" ? [p[0], p[1] + dx, p[2] + dy] : [p[0] + dx, p[1] + dy]);
     const rest = (S, ...ks) => ks.forEach((x) => delete S.a[x]);
     const steps = {
@@ -844,6 +895,7 @@ export default class MissionDashboard extends View {
       .children(this.switching ? [div().flex_none().text_size(10).text_color(t.muted).child("Loading…")] : [])
       .child(div().flex_1())
       .children(m ? [this.progress(t)] : [])
+      .child(this.worldToggles(t))
       .children(m && ["done", "stopped"].includes(m.state) && !m.archived && !this.demo ? [
         div().id("archive-mission").flex_none().px(9).py(5).rounded(6).cursor_pointer().text_size(11).text_color(t.muted)
           .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.archive(cx))
@@ -851,6 +903,22 @@ export default class MissionDashboard extends View {
       .child(div().id("close").w(28).h(28).flex_none().rounded(7).flex().items_center().justify_center().cursor_pointer()
         .tooltip("Close (Esc)").hover((s) => s.bg(t.hover)).on_click(() => closeOverlay(props().overlay))
         .child(svg("mods/workspace-chrome/x.svg").size(15).text_color(t.muted)));
+  }
+
+  // Header: pasture time of day (Auto / Day / Night) and sounds, remembered per viewer.
+  worldToggles(t) {
+    const seg = (mode, label, tip) => div().id(`time-${mode}`).px(7).py(3).rounded(5).cursor_pointer().text_size(10).font_semibold()
+      .bg(this.timeMode === mode ? `${t.accent}2a` : t.surface).text_color(this.timeMode === mode ? t.accent : t.muted)
+      .hover((s) => s.bg(t.hover)).tooltip(tip).on_click((_e, cx) => this.setTimeMode(mode, cx)).child(label);
+    return h_flex().flex_none().gap(6).items_center()
+      .child(h_flex().gap(1).p(1).rounded(6).border(1).border_color(t.border).bg(t.surface)
+        .child(seg("auto", "Auto", `Pasture follows the local clock (now ${clockPhase()})`))
+        .child(seg("day", "Day", "Always day in the pasture"))
+        .child(seg("night", "Night", "Always night in the pasture")))
+      .child(div().id("sound-toggle").px(7).py(3).rounded(6).cursor_pointer().text_size(11).border(1).border_color(t.border)
+        .text_color(this.sound ? t.accent : t.dim).hover((s) => s.bg(t.hover))
+        .tooltip(this.sound ? "Sounds on: a bleat when a worker is done, a chime on a merge. Click to mute." : "Sounds off. Click for a bleat when a worker is done and a chime on a merge.")
+        .on_click((_e, cx) => this.toggleSound(cx)).child(this.sound ? "♪ on" : "♪ off"));
   }
 
   pickerButton(t) {
@@ -1234,7 +1302,7 @@ export default class MissionDashboard extends View {
     // pen, meadow and gate spread out in tall panes (sprites keep their integer scale).
     const ky = Math.max(sc, (H - oy - SKY * sc) / (AH - SKY));
     const X = (ax) => ox + ax * sc, Y = (ay) => Math.round(oy + Math.min(ay, SKY) * sc + Math.max(0, ay - SKY) * ky), skyH = Y(SKY);
-    const hs = this.stage, L = layout(this.have.has("barn2-closed")), SHP = this.dim("sheep").w;
+    const hs = this.stage, L = layout(), SHP = this.dim("sheep").w;
     const chW = this.cw10 / 10, sz = SHP * sc, szOf = (task) => sz * sizeK(task);
     const at = (x, y, c) => div().absolute().left(x).top(y).child(c);
     const barnX = X(L.barn[0]), barnY = Y(L.barn[1]);
@@ -1248,18 +1316,48 @@ export default class MissionDashboard extends View {
     };
     const zone = { pen: [], meadow: [], gate: [], past: [], barn: [] };
     for (const k of m ? d.tasks : []) if (k.state !== "dropped") zone[ZONE[k.state] || "meadow"].push(k);
-    const cloudy = (d.capacity || []).length > 0 || d.impediments.some((r) => r.severity === "block");
+    const ph = this.timeOfDay(), night = ph === "night", wx = this.weather();
+    const top = [], glow = []; // above the time-of-day tint: labels, HUD, bubbles, effects / moon, stars, lit window, owl
+    const soft = []; // scenery rects bubbles prefer to leave clear
+    const empty = !ACTIVE.some((s) => d.tasks.some((x) => m && x.state === s));
     const kids = [
-      div().absolute().left(0).right(0).top(0).h(skyH).bg("#9fd8f2"),
+      div().absolute().left(0).right(0).top(0).h(skyH).bg(night ? SKYC.night : wx === "rain" ? "#8b98a4" : wx === "overcast" ? "#aebdc6" : SKYC[ph]),
       div().absolute().left(0).right(0).top(skyH).bottom(0).bg("#6cbb5a"),
-      div().absolute().left(0).right(0).top(skyH).h(sc).bg("#5aa84a"),
-      at(W - 16 * sc - 14, Math.max(4, Math.floor((skyH - 16 * sc) / 2) + sc), spr("sun", 16, 16, sc)),
       // Measures the font so text-driven walking steps and bubble widths come out in real pixels.
       div().id("char-probe").absolute().left(0).top(-60).text_size(10).whitespace_nowrap().text_color("#00000000").child("MMMMMMMMMM")
         .on_size_change((s, cx) => { if (s.width > 10 && Math.abs(s.width - this.cw10) > 0.5) { this.cw10 = s.width; cx.notify(); } }),
     ];
-    if (cloudy) kids.push(div().absolute().top(Math.max(4, oy + 4 * sc)).loop("left", { from: W - 30 * sc, to: W - 22 * sc, period: 9000 })
-      .child(spr("cloud", 16, 16, sc)));
+    // Sky and weather. Hills are far off: drawn one scale smaller, their strip tiles along the horizon.
+    const hsc = Math.max(1, Math.min(sc - 1, Math.floor((skyH - 6) / 30)));
+    const sunX = W - 16 * sc - 14, sunY = Math.max(4, Math.floor((skyH - 16 * sc) / 2) + sc);
+    if (wx === "rainbow" && !night) {
+      const rsc = Math.max(1, Math.min(sc, Math.floor((skyH + 6 * hsc) / 32)));
+      kids.push(at(Math.round(W * 0.56 - 32 * rsc), skyH + 4 * hsc - 32 * rsc, spr("rainbow", 64, 32, rsc)));
+    }
+    if (night) glow.push(at(sunX, sunY, spr("moon", 16, 16, sc)));
+    else if (wx !== "rain") kids.push(at(sunX, sunY, spr("sun", 16, 16, sc)));
+    for (let x = 0; x < W; x += 256 * hsc) kids.push(at(x, skyH - 40 * hsc, spr("hills", 256, 40, hsc)));
+    kids.push(div().absolute().left(0).right(0).top(skyH).h(sc).bg("#5aa84a"));
+    const cloud = (name, x, drift, period) => kids.push(div().absolute().top(Math.max(2, oy + sc)).loop("left", { from: Math.round(x), to: Math.round(x + drift * sc), period, easing: "ease-in-out" })
+      .child(spr(name, 16, 16, sc)));
+    // Weather keeps to the sky's right corner by the sun, clear of the HUD.
+    if (wx === "cloudy") { cloud("cloud", sunX - 12 * sc, 5, 11000); cloud("cloud", sunX - 34 * sc, -4, 14000); }
+    if (wx === "overcast") { cloud("cloud", sunX - 3 * sc, -3, 9000); cloud("cloud", sunX - 18 * sc, 4, 12000); cloud("cloud", sunX - 34 * sc, -4, 15000); }
+    if (wx === "rain") for (const [f, drift] of [[-2, 3], [-18, -3], [-34, 3]]) {
+      const x = Math.round(sunX + f * sc), y = Math.max(2, oy + sc);
+      kids.push(div().absolute().top(y).loop("left", { from: x, to: x + drift * sc, period: 10000 })
+        .child(spr("cloud-dark", 16, 16, sc))
+        .child(div().absolute().left(0).top(8 * sc).child(flip("rain1", "rain2", 16, 16, sc, 300)))
+        .child(div().absolute().left(0).top(22 * sc).child(flip("rain2", "rain1", 16, 16, sc, 300))));
+    }
+    if (night) {
+      let ss = hash(`${m?.id || d.project}:stars`) || 1;
+      const sr = () => (ss = (ss * 1664525 + 1013904223) >>> 0) / 4294967296;
+      for (let i = 0; i < Math.round(W / 60); i++) {
+        const x = Math.floor(sr() * (W - 8)), y = 3 + Math.floor(sr() * Math.max(4, skyH - 26 * hsc));
+        glow.push(div().absolute().left(x).top(y).loop("opacity", { from: 0.15 + sr() * 0.3, to: 1, period: 1400 + Math.floor(sr() * 2200) }).child(spr("star", 4, 4, Math.max(1, sc - 1))));
+      }
+    }
     // Decoration in fixed spots, seeded by mission id so it does not jump between polls.
     let seed = hash(m?.id || d.project) || 1;
     const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
@@ -1269,7 +1367,58 @@ export default class MissionDashboard extends View {
       kids.push(at(Math.floor(rnd() * (W - 8 * dsc)), skyH + 3 * sc + Math.floor(rnd() * Math.max(1, H - skyH - 8 * dsc - 6 * sc)), spr(name, 8, 8, dsc)));
     }
     // HUD in the sky: plan usage meters and sleeping agents.
-    kids.push(h_flex().absolute().left(12).top(Math.max(8, Math.floor(skyH / 2) - 16)).right(16 * sc + 30).gap(6).flex_wrap().children(this.hud()));
+    const hudY = Math.max(8, Math.floor(skyH / 2) - 16);
+    top.push(h_flex().absolute().left(12).top(hudY).right(52 * sc + 20).gap(6).flex_wrap().children(this.hud()));
+
+    // Scenery. A dirt path runs from the pen gate through the meadow and the review gate to the barn door;
+    // a fence rings the field and splits off the pen and the review side, with the gates as openings.
+    const T = 16 * sc, used = [], dm0 = this.dim("drover"), home0 = pt(L.home), barnBot = barnY + L.barn[3] * sc;
+    const tile = (name, x, y) => { kids.push(at(Math.round(x), Math.round(y), spr(name, 16, 16, sc))); used.push({ x, y, w: T, h: T }); };
+    const vrun = (name, x, y0, y1) => { for (let y = y0; y < y1 - T; y += T) tile(name, x, y); tile(name, x, y1 - T); };
+    const hrun = (name, y, x0, x1) => { for (let x = x0; x < x1 - T; x += T) tile(name, x, y); tile(name, x1 - T, y); };
+    const [pgx, pgy] = L.penGate, [rgx, rgy] = L.reviewGate, py = pgy - 16, turn = rgx - 16, door = L.barn[0] + L.barn[2] / 2 - 8;
+    vrun("path-v", X(pgx), Y(py) + T, Y(pgy) + T);
+    vrun("path-v", X(turn), Y(py) + T, Y(rgy));
+    vrun("path-v", X(door), barnBot - 6 * sc, Y(rgy));
+    hrun("path-h", Y(py), X(pgx) + T, X(turn));
+    hrun("path-h", Y(rgy), X(turn) + T, X(door));
+    tile("path-se", X(pgx), Y(py)); tile("path-sw", X(turn), Y(py)); tile("path-ne", X(turn), Y(rgy)); tile("path-nw", X(door), Y(rgy));
+    hrun("fence2-h", skyH - 12 * sc, 0, barnX + 8 * sc);
+    hrun("fence2-h", H - 12 * sc, 0, W);
+    vrun("fence2-v", -6 * sc, home0.y + dm0.h * sc + 18, H - 6 * sc);
+    vrun("fence2-v", W - 10 * sc, barnBot, H - 6 * sc);
+    vrun("fence2-v", X(92), Y(pgy) + 8 * sc, H - 6 * sc);
+    vrun("fence2-v", X(rgx), skyH - 4 * sc, Y(rgy) + 2 * sc);
+    vrun("fence2-v", X(rgx), Y(rgy) + 14 * sc, H - 6 * sc);
+    // Trees, a pond, bushes and rocks: seeded per mission, kept off the path, fences, labels, anchors and
+    // the drover's corner; the flocks below steer clear of them.
+    let ds = hash(`${m?.id || d.project}:scenery`) || 1;
+    const dr = () => (ds = (ds * 1664525 + 1013904223) >>> 0) / 4294967296;
+    const keep = [...used, { x: 0, y: 0, w: W, h: hudY + 26 }, { x: 0, y: home0.y - 6, w: home0.x + dm0.w * sc + 240, h: dm0.h * sc + 24 },
+      { x: 0, y: Y(pgy) - 14, w: X(104), h: H }, { x: X(106), y: skyH, w: 170, h: 24 }, { x: X(240), y: skyH, w: 140, h: 24 },
+      { x: X(L.barn[0] - 12), y: 0, w: W, h: H },
+      { x: X(L.meadow[0]), y: Y(L.meadow[1]), w: X(rgx + 16) - X(L.meadow[0]), h: Y(rgy) - Y(L.meadow[1]) + 30 * sc },
+      ...["meadow", "reviewGate", "reviewZone", "dog", "past"].map((k) => { const q = pt(L[k]); return { x: q.x - 4 * sc, y: q.y - 4 * sc, w: 32 * sc, h: 32 * sc }; }),
+      ...(empty ? [{ x: X(104), y: Y(SKY + 30) - 6, w: 116 * sc, h: 70 }] : [])];
+    const deco = [];
+    const place = (name, w, h, n, y0, y1) => {
+      for (let i = 0; i < n; i++) for (let k = 0; k < 40; k++) {
+        const r = { x: Math.round(dr() * (W - w * dsc)), y: Math.round(y0 + dr() * Math.max(0, y1 - y0 - h * dsc)), w: w * dsc, h: h * dsc };
+        if (keep.some((q) => area(r, q, 2) > 0) || deco.some((q) => area(r, q, 4 * dsc) > 0)) continue;
+        deco.push({ ...r, name, sw: w, sh: h });
+        break;
+      }
+    };
+    place("tree", 32, 40, 3, skyH + 6, H - 8 * sc);
+    place("pond", 48, 24, 1, skyH + 40, H - 8 * sc);
+    place("bush", 16, 12, 3, skyH + 10, H - 8 * sc);
+    place("rock", 12, 8, 4, skyH + 10, H - 8 * sc);
+    deco.sort((a, b) => a.y + a.h - (b.y + b.h));
+    for (const r of deco) { kids.push(at(r.x, r.y, spr(r.name, r.sw, r.sh, dsc))); soft.push(r); }
+    const avoid = [...deco, { ...pt(L.dog), w: 24 * sc, h: 18 * sc + 14 }];
+    // Owl perches: tree tops, then the barn roof.
+    const perches = [...deco.filter((r) => r.name === "tree").map((r) => ({ x: Math.round(r.x + r.w / 2 - 8 * sc), y: Math.round(r.y + 3 * dsc - 14 * sc) })),
+      { x: barnX + 24 * sc, y: barnY - 12 * sc }];
 
     // Drover (coordinator). Idle behaviour follows its state (working: think / read the scroll, idle: lean on the crook,
     // blocked: alert, out of capacity: doze); a scene can walk it around, or add a second drover (handover).
@@ -1299,7 +1448,7 @@ export default class MissionDashboard extends View {
       const coB = { x: home.x + dm.w * sc + 3 * Math.max(2, sc) + 2, y: home.y, w: bubbleW(coLines, chW), lines: coLines, tail: "left" };
       coB.ty = coB.y + Math.min(bubbleH(coLines) / 2, 5 * sc);
       blocks.push({ x: coB.x, y: coB.y, w: coB.w, h: bubbleH(coLines) });
-      kids.push(...this.bubble("drover-bubble", coB, sc));
+      top.push(...this.bubble("drover-bubble", coB, sc));
     }
 
     // Where each sheep stands. Flocks are scattered organically (seeded by task id) inside each zone;
@@ -1309,17 +1458,13 @@ export default class MissionDashboard extends View {
     const rest = Math.max(0, H - Y(AH - 4));
     // Pen (queued).
     kids.push(div().absolute().left(X(4)).top(Y(100)).w(96 * sc).h(Y(AH - 4) - Y(100)).bg("#5aa84a66"));
-    const fenceA = this.scn("fence2-h", "fence", 16, 16, 16, 16);
-    for (let i = 0; i < 6; i++) {
-      const g = this.scn(hs.gate.pen ? "gate2-open" : "gate2-closed", hs.gate.pen ? "gate-open" : "gate-closed", 16, 16, 16, 16);
-      kids.push(at(X(4 + i * 16), Y(92), i === 3 ? spr(g.file, 16, 16, sc) : spr(fenceA.file, 16, 16, sc)));
-    }
+    for (let i = 0; i < 6; i++) kids.push(at(X(4 + i * 16), Y(pgy), spr(X(4 + i * 16) === X(pgx) ? (hs.gate.pen ? "gate2-open" : "gate2-closed") : "fence2-h", 16, 16, sc)));
     const penMax = 8;
-    kids.push(label(`PEN · queued${zone.pen.length > penMax ? ` · +${zone.pen.length - penMax}` : ""}`, X(6), Y(86) - 8));
+    top.push(label(`PEN · queued${zone.pen.length > penMax ? ` · +${zone.pen.length - penMax}` : ""}`, X(6), Y(86) - 8));
     const pen = zone.pen.slice(0, penMax);
     const waitsOf = (task) => (task.depends_on || []).filter((id) => d.tasks.find((x) => x.id === id)?.state !== "merged");
     flock(pen, { x: X(6), y: Y(104), w: X(98) - X(6), h: Y(AH - 6) - Y(104) + rest },
-      (task) => ({ w: Math.max(szOf(task), 50), h: szOf(task) + (waitsOf(task).length ? 30 : 16), top: 0 }), pos);
+      (task) => ({ w: Math.max(szOf(task), 50), h: szOf(task) + (waitsOf(task).length ? 30 : 16), top: 0 }), pos, avoid);
     for (const task of pen) {
       const w = waitsOf(task);
       sheepOpts.set(task.id, { sc: sc * sizeK(task), after: w.length ? `after ${w[0]}${w.length > 1 ? "+" : ""}` : "" });
@@ -1339,30 +1484,29 @@ export default class MissionDashboard extends View {
       return { w: Math.max(w, Math.min(maxW, lines.length ? bubbleW(lines, chW) * 0.8 : w)), h: szOf(task) + 16 + (lines.length ? room : 0), top: lines.length ? room : 0, inner: w };
     };
     const meadowMax = 9, gateMax = 6;
-    kids.push(label(`MEADOW · working${zone.meadow.length > meadowMax ? ` · +${zone.meadow.length - meadowMax}` : ""}`, X(108), skyH + 6));
+    top.push(label(`MEADOW · working${zone.meadow.length > meadowMax ? ` · +${zone.meadow.length - meadowMax}` : ""}`, X(108), skyH + 6));
     const meadow = zone.meadow.slice(0, meadowMax);
     const MR = { x: X(106), y: skyH + 22, w: X(216) - X(106), h: H - 8 - skyH - 22 };
-    flock(meadow, MR, (task) => foot(task, MR.w), pos);
-    kids.push(label(`GATE · review${zone.gate.length > gateMax ? ` · +${zone.gate.length - gateMax}` : ""}`, X(242), skyH + 6));
+    flock(meadow, MR, (task) => foot(task, MR.w), pos, avoid);
+    top.push(label(`GATE · review${zone.gate.length > gateMax ? ` · +${zone.gate.length - gateMax}` : ""}`, X(242), skyH + 6));
     const gate = zone.gate.slice(0, gateMax);
     const GR = { x: X(240), y: skyH + 22, w: X(302) - X(240), h: Y(AH - 4) - skyH - 22 };
-    flock(gate, GR, (task) => foot(task, GR.w), pos);
+    flock(gate, GR, (task) => foot(task, GR.w), pos, avoid);
     for (const task of [...meadow, ...gate]) {
       sheepOpts.set(task.id, { sc: sc * sizeK(task), path: status(task) === "walk" ? PATH : 0 });
       const { msg, st } = talker(task);
       if (msg) talk.push({ task, msg, alert: st === "alert" });
     }
-    if (!ACTIVE.some((s) => d.tasks.some((x) => m && x.state === s))) {
+    if (empty) {
       const line = !d.missions.length ? "No missions yet. Start one from this project's home to send some sheep out."
         : !m ? "Pick a mission above." : "All sheep home. Start a mission to send some out.";
-      kids.push(div().absolute().left(X(104)).top(Y(SKY + 30)).w(116 * sc).flex().justify_center()
+      top.push(div().absolute().left(X(104)).top(Y(SKY + 30)).w(116 * sc).flex().justify_center()
         .child(div().px(12).py(7).rounded(8).bg("#00000038").text_color("#ffffff").text_size(13).font_semibold().whitespace_normal().text_center().child(line)));
     }
 
     // Gate with the sheepdog (review): the gate opens for the scenes, else while sheep are there.
     const open = hs.gate.rev ?? zone.gate.length + zone.past.length > 0;
-    const gA = this.scn(open ? "gate2-open" : "gate2-closed", open ? "gate-open" : "gate-closed", 16, 16, 16, 16);
-    kids.push(at(X(L.reviewGate[0]), Y(L.reviewGate[1]), spr(gA.file, 16, 16, sc)));
+    kids.push(at(X(L.reviewGate[0]), Y(L.reviewGate[1]), spr(open ? "gate2-open" : "gate2-closed", 16, 16, sc)));
     const rev = d.agents.filter((a) => a.role === "reviewer"), dogA = rev[rev.length - 1];
     const dg = hs.a.dog, dd = this.dim("dog"), dp = pt(dg?.at || L.dog), dmo = { duration: hs.move, easing: "linear" };
     actors.set("dog", { x: dp.x, y: dp.y, w: dd.w * sc, h: dd.h * sc });
@@ -1374,13 +1518,17 @@ export default class MissionDashboard extends View {
     blocks.push({ x: dp.x, y: dp.y, w: dd.w * sc, h: dd.h * sc + 14 }, { x: X(L.reviewGate[0]), y: Y(L.reviewGate[1]), w: 16 * sc, h: 16 * sc });
 
     // Barn (door opens for the merge scene) with the merged sheep sitting at its foot and hay bales beside it; approved sheep wait below.
-    const bA = this.scn(hs.barn ? "barn2-open" : "barn2-closed", "barn", 64, 56, 48, 40), bh = L.barn[3];
-    kids.push(at(barnX, barnY, spr(bA.file, bA.w, bA.h, sc)));
+    // The chimney smokes while the mission runs; at night the hayloft window is lit (overlay at 28,14, see make_sprites.py).
+    const bh = L.barn[3];
+    kids.push(div().absolute().left(barnX + 43 * sc).top(barnY + 2 * sc).w(5 * sc).h(8 * sc).bg("#8a3b30").border(1).border_color("#4a1b1c"));
+    kids.push(at(barnX, barnY, spr(hs.barn ? "barn2-open" : "barn2-closed", 64, 56, sc)));
+    if (m?.state === "running") kids.push(at(barnX + 41 * sc, barnY - 10 * sc, flip3("smoke1", "smoke2", "smoke3", 8, 12, sc, 1800)));
+    if (night) glow.push(at(barnX + 28 * sc, barnY + 14 * sc, spr("barn2-window-lit", 8, 8, sc)));
     blocks.push({ x: barnX, y: barnY, w: L.barn[2] * sc, h: bh * sc });
     const hay = Math.min(6, zone.barn.filter((k) => !this.pendingMerge.has(k.id)).length);
     for (let i = 0; i < hay; i++) {
       const hx = barnX - (i % 3 + 1) * 13 * sc, hy = barnY + (bh - 10) * sc - Math.floor(i / 3) * 9 * sc;
-      kids.push(at(hx, hy, this.have.has("hay") ? spr("hay", 12, 10, sc) : div().w(11 * sc).h(8 * sc).rounded(2).bg("#d9b44a").border(1).border_color("#a98728")));
+      kids.push(at(hx, hy, spr("hay", 12, 10, sc)));
     }
     const ms = Math.max(2, sc - 1), per = Math.max(1, Math.floor(58 * sc / (SHP * ms + 2)));
     const mergedY = barnY + (bh + 2) * sc, mergedRows = Math.max(1, Math.ceil(Math.min(zone.barn.length, per * 2) / per));
@@ -1388,9 +1536,9 @@ export default class MissionDashboard extends View {
       pos.set(task.id, { x: X(L.barn[0] - 6) + (i % per) * (SHP * ms + 2), y: mergedY + Math.floor(i / per) * (SHP * ms + 2) });
       sheepOpts.set(task.id, { sc: ms, tag: false });
     });
-    kids.push(label(zone.barn.length ? `merged ×${zone.barn.length}` : "barn · nothing merged yet", X(L.barn[0] - 4), mergedY + mergedRows * (SHP * ms + 2)));
+    top.push(label(zone.barn.length ? `merged ×${zone.barn.length}` : "barn · nothing merged yet", X(L.barn[0] - 4), mergedY + mergedRows * (SHP * ms + 2)));
     const pastY = Math.max(Y(96), mergedY + mergedRows * (SHP * ms + 2) + 22);
-    kids.push(label(`APPROVED${zone.past.length > 2 ? ` · +${zone.past.length - 2}` : ""}`, X(L.barn[0] - 4), pastY));
+    top.push(label(`APPROVED${zone.past.length > 2 ? ` · +${zone.past.length - 2}` : ""}`, X(L.barn[0] - 4), pastY));
     zone.past.slice(0, 2).forEach((task, i) => { pos.set(task.id, { x: X(L.past[0] + i * 29), y: pastY + 16 }); sheepOpts.set(task.id, { sc: sc * sizeK(task) }); });
 
     // Sheep, noting which ones just changed spot so they trot (facing their way) instead of sliding.
@@ -1416,6 +1564,7 @@ export default class MissionDashboard extends View {
       let c = 0;
       for (const b of [...blocks, ...placed]) c += 1000 * area(r, b, 2);
       for (const [id, s] of sheepRects) if (id !== own) c += 3 * area(r, s, 1);
+      for (const q of soft) c += area(r, q, 0);
       return c;
     };
     const fit = (S, bw, bh, own) => {
@@ -1453,15 +1602,15 @@ export default class MissionDashboard extends View {
       const lines = wrap(msg, 26, 2), bw = bubbleW(lines, chW), bh = bubbleH(lines);
       const b = fit(S, bw, bh, task.id);
       placed.push({ x: b.x, y: b.y, w: b.w, h: b.h });
-      kids.push(...this.bubble(`bubble-${task.id}`, { ...b, lines, alert }, sc));
+      top.push(...this.bubble(`bubble-${task.id}`, { ...b, lines, alert }, sc));
     }
-    if (full) kids.push(...this.bubble("bubble-full", full, sc, true));
+    if (full) top.push(...this.bubble("bubble-full", full, sc, true));
 
     // Scene effects float up from an actor or a spot; scene speech bubbles sit above their speaker.
     for (const f of hs.fx) {
       const r = f.on ? (f.on.startsWith("s:") ? sheepRects.get(f.on.slice(2)) : actors.get(f.on)) : null;
       const q = f.at ? pt(f.at) : r ? { x: r.x + (r.sp || r.w) / 2 - 4 * sc, y: r.y - 8 * sc } : null;
-      if (q) kids.push(div().absolute().left(Math.round(q.x)).top(Math.round(q.y))
+      if (q) top.push(div().absolute().left(Math.round(q.x)).top(Math.round(q.y))
         .loop("top", { from: Math.round(q.y), to: Math.round(q.y - 8 * sc), period: 900, easing: "ease-out" }).child(this.fxEl(f.k, sc)));
     }
     for (const [key, a] of Object.entries(hs.a)) {
@@ -1469,7 +1618,7 @@ export default class MissionDashboard extends View {
       if (!r) continue;
       const lines = wrap(a.msg, 22, 2), bw = bubbleW(lines, chW), bh = bubbleH(lines), mid = r.x + (r.sp || r.w) / 2;
       const x = Math.round(Math.max(4, Math.min(W - bw - 4, mid - bw / 2)));
-      kids.push(...this.bubble(`say-${key}`, { x, y: Math.max(4, r.y - tailH - bh), w: bw, lines, tail: "down", stalk: 0,
+      top.push(...this.bubble(`say-${key}`, { x, y: Math.max(4, r.y - tailH - bh), w: bw, lines, tail: "down", stalk: 0,
         tx: Math.max(x + 6 + 3 * p, Math.min(x + bw - 6 - 3 * p, mid)) }, sc, true));
     }
 
@@ -1479,7 +1628,18 @@ export default class MissionDashboard extends View {
         if (fill ? Math.abs(s.width - (this.size?.width || 0)) + Math.abs(s.height - (this.size?.height || 0)) > 2
           : Math.abs(s.width - (this.size?.width || 0)) > 2) { this.size = fill ? s : { width: s.width, height: this.size?.height || s.height }; cx.notify(); }
       })
-      .children(kids);
+      .children([...kids, ...(TINT[ph] ? [div().absolute().left(0).right(0).top(0).bottom(0).bg(TINT[ph])] : []), ...glow, ...this.owlEl(night, perches, W, skyH, sc), ...top]);
+  }
+
+  // The owl at night (see owlStep): off the left edge, flying in, perched, or flying off to the right.
+  owlEl(night, perches, W, skyH, sc) {
+    const o = this.owl;
+    if (!night || !o) return [];
+    const tgt = perches[o.n % perches.length], fly = o.st === "in" || o.st === "out";
+    const p = o.st === "away" ? { x: -24 * sc, y: Math.round(skyH * 0.3) } : o.st === "out" ? { x: W + 8 * sc, y: Math.round(skyH * 0.1) } : tgt;
+    const mo = { duration: fly ? OWL_FLY : 0, easing: "ease-in-out" };
+    return [div().id("owl").absolute().left(p.x).top(p.y).transition("left", mo).transition("top", mo).tooltip("Night owl")
+      .child(o.st === "perch" ? spr("owl-perch", 16, 16, sc) : flip("owl-fly1", "owl-fly3", 16, 16, sc, 280))];
   }
 
   historySection(t) {
