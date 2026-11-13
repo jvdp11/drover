@@ -82,12 +82,52 @@ function layout() {
 }
 // Scene stage: S = { a: { drover, drover2, dog, "s:<task>": { at, dir, pose, msg, fam, hide, lamb } }, gate: { pen, rev }, barn, fx: [{ k, on | at }], move }.
 const put = (S, k, p) => { S.a[k] = { ...S.a[k], ...p }; };
-// Walk (or run) actor k to a point, turning to face the way it goes.
-const go = (S, k, at, p = {}) => {
-  const from = S.a[k]?.at || S.home[k] || at, x = (q) => (typeof q[0] === "string" ? S.L.barn[0] + q[1] : q[0]);
-  put(S, k, { at, dir: x(at) < x(from) ? "l" : x(at) > x(from) ? "r" : S.a[k]?.dir || "r", ...p });
+// Route graph over layout(): the dirt path's waypoints in order (path tile top-left, art px; `s` = distance along it),
+// with the pen and review gates as openings in the fences. Zones join the path: the pen at its gate, the meadow on the
+// upper path row, the review area, approved spot and barnyard on the lower row past the review gate, the barn at its door.
+function routeGraph(L = layout()) {
+  const [pgx, pgy] = L.penGate, [rgx, rgy] = L.reviewGate, py = pgy - 16, turn = rgx - 16, door = L.barn[0] + L.barn[2] / 2 - 8;
+  const path = [{ at: [pgx, pgy], gate: "pen" }, { at: [pgx, py] }, { at: [turn, py] }, { at: [turn, rgy] }, { at: [rgx, rgy], gate: "rev" }, { at: [door, rgy] }];
+  path.forEach((n, i) => { n.s = i ? path[i - 1].s + Math.abs(n.at[0] - path[i - 1].at[0]) + Math.abs(n.at[1] - path[i - 1].at[1]) : 0; });
+  return { L, path, pgx, pgy, rgx, rgy, py, turn, door, zones: { pen: L.penIn, meadow: L.meadow, review: L.reviewZone, approved: L.past, barn: L.barnDoor } };
+}
+// Figure sizes in art px; a point may carry a figure offset in sprite px: [ax, ay, dx, dy].
+const FIG = { sheep: { w: 24, h: 24 }, lamb: { w: 16, h: 16 }, drover: { w: 24, h: 32 }, dog: { w: 24, h: 18 } };
+const artXY = (L, q) => (typeof q[0] === "string" ? [L.barn[0] + q[1], L.barn[1] + q[2]] : [q[0] + (q[2] || 0), q[1] + (q[3] || 0)]);
+// Which zone a figure standing at q is in (by its feet), and where (and how far along) it joins the path.
+function where(G, q, fig) {
+  if (typeof q[0] === "string") return { zone: "barn", s: G.path.at(-1).s + 1, j: null };
+  const [x, y] = artXY(G.L, q), fx = x + fig.w / 2, fy = y + fig.h, rev = G.path[4].s;
+  if (fx >= G.rgx + 8) {
+    const jx = Math.max(G.rgx + 12, Math.min(G.door, fx - 8));
+    return { zone: fy < G.rgy + 4 ? "barnyard" : fx >= G.L.past[0] ? "approved" : "review", s: rev + jx - G.rgx, j: [jx, G.rgy] };
+  }
+  if (fx < G.pgx + 48 && fy > G.pgy + 8) return { zone: "pen", s: 0, j: [G.pgx, G.pgy], gate: "pen" };
+  const jx = Math.max(G.pgx, Math.min(G.turn, fx - 8));
+  return { zone: "meadow", s: G.path[1].s + jx - G.pgx, j: [jx, G.py], fx, fy };
+}
+// Waypoints from `from` to `to` for a figure: its zone's join (the pen's is its gate), the path between, the target's join, the target.
+// Inside one zone it goes straight, except across the meadow's corner by the pen.
+function route(from, to, fig = FIG.sheep, G = routeGraph()) {
+  const a = where(G, from, fig), b = where(G, to, fig);
+  if (a.zone === b.zone && (a.zone !== "meadow" || Math.min(a.fx, b.fx) >= G.pgx + 52 || Math.max(a.fy, b.fy) <= G.pgy)) return [{ at: to }];
+  const off = (t) => [t[0], t[1], 8 - fig.w / 2, 11 - fig.h];
+  const lo = Math.min(a.s, b.s), hi = Math.max(a.s, b.s), mid = G.path.filter((n) => n.s > lo && n.s < hi);
+  if (a.s > b.s) mid.reverse();
+  const out = [...(a.j ? [{ at: off(a.j), gate: a.gate }] : []), ...mid.map((n) => ({ at: off(n.at), gate: n.gate })),
+    ...(b.j ? [{ at: off(b.j), gate: b.gate }] : []), { at: to }];
+  return out.filter((l, i) => !i || String(l.at) !== String(out[i - 1].at));
+}
+// Walking pace (ms per art px): a walk takes its step's time, or longer when the route is long.
+const PACE = 12;
+const artDist = (L, p, q) => { const [ax, ay] = artXY(L, p), [bx, by] = artXY(L, q); return Math.hypot(bx - ax, by - ay); };
+const figOf = (S, k) => (k.startsWith("s:") ? (S.a[k]?.lamb ? FIG.lamb : FIG.sheep) : k === "dog" ? FIG.dog : FIG.drover);
+// Walk (or run) actor k to a point along its route; the stage plays the legs (see pump).
+const go = (S, k, to, p = {}) => {
+  const from = S.a[k]?.at || S.home[k] || to;
+  put(S, k, { ...p, legs: route(from, to, figOf(S, k), S.G) });
 };
-const newStage = (L) => ({ L, a: {}, gate: {}, barn: false, fx: [], move: 300, home: { drover: L.home, drover2: L.edge, dog: L.dog } });
+const newStage = (L) => ({ L, G: routeGraph(L), a: {}, gate: {}, barn: false, fx: [], move: 300, home: { drover: L.home, drover2: L.edge, dog: L.dog } });
 // Wrap text to lines of at most n chars; past `max` lines the last one ends in an ellipsis.
 function wrap(text, n, max = 2) {
   const words = String(text || "").replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
@@ -310,7 +350,7 @@ export default class MissionDashboard extends View {
     this.handle = cx.focus_handle();
     this.handle.focus();
     this.history = false; this.picker = false; this.size = null;
-    this.cw10 = 60; this.pos = new Map(); this.trot = new Map(); this.trotUntil = 0; this.hovered = null;
+    this.cw10 = 60; this.pos = new Map(); this.trot = new Map(); this.trotUntil = 0; this.passing = new Map(); this.hovered = null;
     this.load(cx);
     this.panel = null; this.peekLines = []; this.result = null; this.confirmDrop = false; this.acting = false; this.moveOpen = false;
     this.sayInput = InputState.new({ placeholder: "Say something to this agent…" });
@@ -385,15 +425,41 @@ export default class MissionDashboard extends View {
     });
   }
 
-  // A task changed state (so a sheep may move): let moved sheep trot for a moment, then redraw once to settle them.
+  // A task changed state (so a sheep may move): the next draw notes moved sheep and routes them; then trot them there.
   noteMoves(d, cx) {
     const old = this.data;
     if (!old || old.mission?.id !== d.mission?.id) return;
     const before = new Map(old.tasks.map((k) => [k.id, k.state]));
     if (!d.tasks.some((k) => before.has(k.id) && before.get(k.id) !== k.state)) return;
     this.trotUntil = Date.now() + TROT;
-    cx.timer.after(TROT + 120, (cx) => cx.notify());
+    cx.timer.after(50, (cx) => this.trotKick(cx));
   }
+
+  // Start the routed trots the last draw noted: one cx.timer.after per leg, no redraw timer.
+  trotKick(cx, tries = 0) {
+    let n = 0;
+    for (const [id, tr] of this.trot) if (tr.i < 0) { n++; this.trotLeg(id, tr, 0, cx); }
+    if (!n && tries < 5) cx.timer.after(60, (cx) => this.trotKick(cx, tries + 1));
+  }
+
+  trotLeg(id, tr, i, cx) {
+    const live = this.trot.get(id) === tr;
+    this.passGates(`t:${id}`, live ? tr.legs : [], i);
+    if (live && i < tr.legs.length) {
+      tr.i = i; cx.notify();
+      cx.timer.after(tr.legs[i].ms, (cx) => this.trotLeg(id, tr, i + 1, cx));
+      return;
+    }
+    if (live) { this.trot.delete(id); cx.notify(); }
+    if (!this.trot.size) this.pump(cx);
+  }
+
+  // Gates stand open while someone heads into one or out of it (token -> gates; see route()).
+  passGates(token, legs, i) {
+    const g = new Set(i < legs.length ? [legs[i]?.gate, legs[i - 1]?.gate].filter(Boolean) : []);
+    if (g.size) this.passing.set(token, g); else this.passing.delete(token);
+  }
+  gateOpen(g) { for (const s of this.passing.values()) if (s.has(g)) return true; return false; }
 
   // --- sprite lookup (contract v2) ---
   art(kind, fam, pose, dir) {
@@ -512,27 +578,55 @@ export default class MissionDashboard extends View {
 
   // Play the next queued scene: one cx.timer.after per step, no redraw timers.
   pump(cx) {
-    if (this.playing) return;
+    if (this.playing || this.trot.size) return;
     if (!this.queue.length && this.replay) { this.script().forEach((e) => this.enqueue(e)); this.queue.push({ ev: {}, steps: [[2500, null]] }); }
     const sc = this.queue.shift();
     if (!sc) return;
     this.playing = true;
     if (this.sound && (sc.ev.k === "done" || sc.ev.k === "merge")) playSound(sc.ev.k === "done" ? SOUND.bleat : SOUND.chime);
-    const L = layout(), S = this.stage = newStage(L);
-    // Sheep scenes end with a trot to the settled place, so the tail waits for it.
-    const steps = [...sc.steps, [sc.ev.id ? TROT + 120 : 250, () => {
+    const L = layout(), fresh = () => { for (const k of [...this.passing.keys()]) if (k.startsWith("a:")) this.passing.delete(k); return newStage(L); };
+    this.stage = fresh();
+    // Sheep scenes end with a routed trot to the settled place; the next scene waits for it (pump).
+    const steps = [...sc.steps, [sc.ev.id ? 300 : 250, () => {
       this.pending.delete(sc.ev.id); this.pendingMerge.delete(sc.ev.id);
-      this.stage = newStage(L); this.trotUntil = Date.now() + TROT;
+      this.stage = fresh(); this.trotUntil = Date.now() + TROT; this.kick = true;
     }]];
     const run = (i, cx) => {
-      const [ms, fn] = steps[i], S = this.stage;
-      S.fx = []; S.move = ms;
-      for (const a of Object.values(S.a)) delete a.msg;
-      fn?.(S);
+      let [ms, fn] = steps[i];
+      const S0 = this.stage;
+      S0.fx = [];
+      for (const a of Object.values(S0.a)) { delete a.msg; delete a.mv; }
+      fn?.(S0);
+      // Walkers started this step all take the step's time, or longer when a route is long.
+      const S = this.stage, walks = Object.entries(S.a).filter(([, a]) => a.legs);
+      for (const [k, a] of walks) {
+        let at = a.at || S.home[k] || a.legs.at(-1).at;
+        a.d = a.legs.map((l) => { const d = artDist(L, at, l.at); at = l.at; return d; });
+        ms = Math.max(ms, Math.round(a.d.reduce((x, y) => x + y, 0) * PACE));
+      }
+      S.move = ms;
+      for (const [k, a] of walks) this.walk(S, k, a, ms, cx);
       cx.notify();
+      if (this.kick) { this.kick = false; cx.timer.after(50, (cx) => this.trotKick(cx)); }
       cx.timer.after(ms, (cx) => { if (i + 1 < steps.length) run(i + 1, cx); else { this.playing = false; cx.notify(); this.pump(cx); } });
     };
     run(0, cx);
+  }
+
+  // Walk stage actor k along its legs over ms: one cx.timer.after per leg, each leg facing its own way (-l going left).
+  walk(S, k, a, ms, cx) {
+    const legs = a.legs, d = a.d, tot = d.reduce((x, y) => x + y, 0) || 1, X = (q) => artXY(S.L, q)[0];
+    delete a.legs; delete a.d;
+    const leg = (i, cx) => {
+      if (this.stage !== S) return;
+      this.passGates(`a:${k}`, legs, i);
+      if (i >= legs.length) { cx.notify(); return; }
+      const cur = S.a[k], from = cur.at || S.home[k], to = legs[i].at, mv = Math.max(1, Math.round(ms * d[i] / tot));
+      put(S, k, { at: to, mv, dir: X(to) < X(from) - 0.5 ? "l" : X(to) > X(from) + 0.5 ? "r" : cur.dir || "r" });
+      if (i) cx.notify();
+      cx.timer.after(mv, (cx) => leg(i + 1, cx));
+    };
+    leg(0, cx);
   }
 
   // The demo replay: every scene once, on the demo mission's tasks.
@@ -544,43 +638,41 @@ export default class MissionDashboard extends View {
 
   // Scene scripts: [ms, fn(stage)] steps. Walking steps last as long as the walk (stage.move drives the native transition).
   build(e) {
-    const L = layout(), k = `s:${e.id}`, M = L.meadow, G = L.reviewGate, Z = L.reviewZone;
+    const L = layout(), G = routeGraph(L), k = `s:${e.id}`, M = L.meadow, Z = L.reviewZone;
     const W = { pose: "walk" }, at = (p, dx, dy) => (typeof p[0] === "string" ? [p[0], p[1] + dx, p[2] + dy] : [p[0] + dx, p[1] + dy]);
     const rest = (S, ...ks) => ks.forEach((x) => delete S.a[x]);
     const steps = {
-      // a lamb appears in the pen, the drover opens the gate and leads it out
+      // a lamb appears in the pen; the drover walks along the path and in through the gate, then leads it out
       added: () => [
         [900, (S) => { this.pending.delete(e.id); put(S, k, { at: L.penIn, pose: "walk", lamb: true, dir: "r" }); S.fx.push({ k: "sparkle1", on: k }); }],
-        [1500, (S) => go(S, "drover", at(L.penGate, -4, -34), W)],
-        [600, (S) => { put(S, "drover", { pose: "idle", dir: "r" }); S.gate.pen = true; }],
-        [900, (S) => go(S, k, at(L.penGate, -4, -14), W)],
-        [1300, (S) => { go(S, "drover", at(L.penGate, 40, -34), W); go(S, k, at(L.penGate, 16, -14), W); }],
-        ...(e.queued ? [[1000, (S) => go(S, k, L.penIn, W)]] : []),
-        [900, (S) => { S.gate.pen = false; go(S, "drover", L.home, W); }],
+        [1600, (S) => go(S, "drover", at(L.penIn, 22, -14), W)],
+        [500, (S) => put(S, "drover", { pose: "idle", dir: "l" })],
+        [1500, (S) => { go(S, "drover", [G.pgx + 40, G.py, 8 - FIG.drover.w / 2, 11 - FIG.drover.h], W); go(S, k, [G.pgx + 14, G.py, 8 - FIG.lamb.w / 2, 11 - FIG.lamb.h], W); }],
+        ...(e.queued ? [[1000, (S) => { put(S, "drover", { pose: "idle" }); go(S, k, L.penIn, W); }]] : []),
+        [1200, (S) => go(S, "drover", L.home, W)],
       ],
       done: () => [[2200, (S) => put(S, k, { msg: "baa, done!" })]],
-      // the drover whistles, the dog herds the sheep to the gate and sits
+      // the drover whistles; the dog runs out through the gate, gets behind the sheep and herds it along the path into review
       review: () => [
         [1000, (S) => { put(S, k, { at: M, pose: "graze1", dir: "r" }); put(S, "drover", { pose: "whistle" }); S.fx.push({ k: "note", on: "drover" }); }],
-        [1300, (S) => { rest(S, "drover"); go(S, "dog", at(M, 28, 6), { pose: "run" }); }],
-        [1800, (S) => { S.gate.rev = true; go(S, k, at(G, -8, -6), W); go(S, "dog", at(G, -34, 6), { pose: "run" }); }],
-        [800, (S) => { put(S, k, { pose: "sit" }); go(S, "dog", L.dog, { pose: "run" }); }],
-        [600, (S) => { put(S, "dog", { pose: "sit" }); S.gate.rev = false; }],
+        [1500, (S) => { rest(S, "drover"); go(S, "dog", at(M, -28, 6), { pose: "run" }); }],
+        [300, (S) => put(S, "dog", { pose: "bark", dir: "r" })],
+        [1900, (S) => { go(S, k, Z, W); go(S, "dog", L.dog, { pose: "run" }); }],
+        [600, (S) => { put(S, k, { pose: "sit", dir: "l" }); put(S, "dog", { pose: "sit", dir: "l" }); }],
       ],
-      // the dog barks, the sheep trots back to the meadow
+      // the dog barks, the sheep trots back through the gate to the meadow
       changes: () => [
         [1000, (S) => { put(S, k, { at: Z, pose: "sit", dir: "l" }); put(S, "dog", { pose: "bark", dir: "l", msg: "woof!" }); }],
-        [1700, (S) => { S.gate.rev = true; put(S, "dog", { pose: "sit" }); go(S, k, M, W); }],
-        [400, (S) => { S.gate.rev = false; put(S, k, { pose: "graze1" }); }],
+        [1700, (S) => { put(S, "dog", { pose: "sit" }); go(S, k, M, W); }],
+        [400, (S) => put(S, k, { pose: "graze1" })],
       ],
-      // the dog wags, the gate opens, the sheep passes
+      // the dog wags, the sheep trots up onto the path and along it to the approved spot
       approve: () => [
         [1000, (S) => { put(S, k, { at: Z, pose: "sit", dir: "l" }); put(S, "dog", { pose: "wag", dir: "l" }); }],
-        [800, (S) => { S.gate.rev = true; go(S, k, at(G, 12, 0), W); }],
         [1500, (S) => go(S, k, L.past, W)],
-        [400, (S) => { S.gate.rev = false; put(S, "dog", { pose: "sit" }); put(S, k, { pose: "sit" }); }],
+        [400, (S) => { put(S, "dog", { pose: "sit" }); put(S, k, { pose: "sit" }); }],
       ],
-      // the barn door opens, the sheep walks in: hearts, confetti, a new hay bale
+      // the barn door opens, the sheep walks the path in: hearts, confetti, a new hay bale
       merge: () => [
         [800, (S) => { S.barn = true; put(S, k, { at: L.past, pose: "sit", dir: "r" }); }],
         [1500, (S) => go(S, k, L.barnDoor, W)],
@@ -1253,7 +1345,7 @@ export default class MissionDashboard extends View {
         .hover((s) => s.bg("#d9f2dc")).tooltip(`Move ${task.id} off ${task.agent}: ${this.altUsage(task.alternatives[0])}`)
         .on_click((_e, cx) => { cx.stop_propagation(); this.openPanel(task.id, cx); this.move(task, task.alternatives[0], cx); })
         .child(`wake: move to ${this.altLabel(task.alternatives[0])}`)] : []);
-    const motion = { duration: act?.at ? this.stage.move : TROT, easing: act?.at ? "linear" : "ease-in-out" };
+    const motion = { duration: act?.at ? act.mv ?? this.stage.move : o.mv ?? TROT, easing: act?.at || o.mv ? "linear" : "ease-in-out" };
     return h_flex().id(`sheep-${task.id}`).absolute().left(x).top(y).items_start()
       .transition("left", motion).transition("top", motion)
       .opacity(act?.hide ? 0 : st === "gone" ? 0.45 : 1)
@@ -1307,7 +1399,9 @@ export default class MissionDashboard extends View {
     const at = (x, y, c) => div().absolute().left(x).top(y).child(c);
     const barnX = X(L.barn[0]), barnY = Y(L.barn[1]);
     // Scene points -> screen pixels (see layout()).
-    const pt = (q) => (typeof q[0] === "string" ? { x: barnX + q[1] * sc, y: barnY + q[2] * sc } : { x: X(q[0]), y: Y(q[1]) });
+    const pt = (q) => (typeof q[0] === "string" ? { x: barnX + q[1] * sc, y: barnY + q[2] * sc } : { x: X(q[0]) + (q[2] || 0) * sc, y: Y(q[1]) + (q[3] || 0) * sc });
+    // Screen pixels -> art point (inverse of pt for plain points), for routing settled sheep.
+    const toArt = (p) => [(p.x - ox) / sc, p.y <= skyH ? SKY - (skyH - p.y) / sc : SKY + (p.y - skyH) / ky];
     const actors = new Map(); // key -> screen rect of drovers and the dog, for effects and speech bubbles
     const blocks = []; // laid-out rects that speech bubbles must not cover
     const zone = { pen: [], meadow: [], gate: [], past: [], barn: [] };
@@ -1372,7 +1466,7 @@ export default class MissionDashboard extends View {
     const tile = (name, x, y) => { kids.push(at(Math.round(x), Math.round(y), spr(name, 16, 16, sc))); used.push({ x, y, w: T, h: T }); };
     const vrun = (name, x, y0, y1) => { for (let y = y0; y < y1 - T; y += T) tile(name, x, y); tile(name, x, y1 - T); };
     const hrun = (name, y, x0, x1) => { for (let x = x0; x < x1 - T; x += T) tile(name, x, y); tile(name, x1 - T, y); };
-    const [pgx, pgy] = L.penGate, [rgx, rgy] = L.reviewGate, py = pgy - 16, turn = rgx - 16, door = L.barn[0] + L.barn[2] / 2 - 8;
+    const RG = routeGraph(L), { pgx, pgy, rgx, rgy, py, turn, door } = RG;
     vrun("path-v", X(pgx), Y(py) + T, Y(pgy) + T);
     vrun("path-v", X(turn), Y(py) + T, Y(rgy));
     vrun("path-v", X(door), barnBot - 6 * sc, Y(rgy));
@@ -1469,7 +1563,7 @@ export default class MissionDashboard extends View {
       const idle = co?.status === "gone" ? { poses: ["idle1"] } : asleep ? { poses: ["doze"], zzz: true }
         : co?.status === "blocked" ? { poses: ["idle1", "idle2"], alert: true, period: 700 }
         : co?.status === "working" ? { poses: ["think", "read"], period: 4000 } : { poses: ["lean"] };
-      const p = pt(ao?.at || home), w = dm.w * sc, mo = { duration: hs.move, easing: "linear" };
+      const p = pt(ao?.at || home), w = dm.w * sc, mo = { duration: ao?.mv ?? hs.move, easing: "linear" };
       const poses = ao?.pose ? POSES[ao.pose] || [ao.pose] : idle.poses, calm = !ao?.pose;
       actors.set(key, { x: p.x, y: p.y, w, h: dm.h * sc });
       return this.clickable(v_flex().id(key).absolute().left(p.x).top(p.y).items_center().gap(1).transition("left", mo).transition("top", mo)
@@ -1498,10 +1592,11 @@ export default class MissionDashboard extends View {
     const rest = Math.max(0, H - Y(AH - 4));
     // Pen (queued).
     kids.push(div().absolute().left(X(4)).top(Y(100)).w(96 * sc).h(Y(AH - 4) - Y(100)).bg("#5aa84a66"));
-    for (let i = 0; i < 6; i++) kids.push(at(X(4 + i * 16), Y(pgy), spr(X(4 + i * 16) === X(pgx) ? (hs.gate.pen ? "gate2-open" : "gate2-closed") : "fence2-h", 16, 16, sc)));
+    for (let i = 0; i < 6; i++) kids.push(at(X(4 + i * 16), Y(pgy), spr(X(4 + i * 16) === X(pgx) ? (hs.gate.pen || this.gateOpen("pen") ? "gate2-open" : "gate2-closed") : "fence2-h", 16, 16, sc)));
     const pen = zone.pen.slice(0, penMax);
     const waitsOf = (task) => (task.depends_on || []).filter((id) => d.tasks.find((x) => x.id === id)?.state !== "merged");
-    flock(pen, { x: X(6), y: penSign.y + penSign.h + sc, w: X(98) - X(6), h: Y(AH - 6) - penSign.y - penSign.h - sc + rest },
+    const floor = H - 8 * sc; // flocks keep above the bottom fence's rails
+    flock(pen, { x: X(6), y: penSign.y + penSign.h + sc, w: X(94) - X(6), h: Math.min(Y(AH - 6) + rest, floor) - penSign.y - penSign.h - sc },
       (task) => ({ w: Math.max(szOf(task), 50), h: szOf(task) + (waitsOf(task).length ? 30 : 16), top: 0 }), pos, avoid);
     for (const task of pen) {
       const w = waitsOf(task);
@@ -1524,11 +1619,11 @@ export default class MissionDashboard extends View {
       return { w: Math.max(w, Math.min(maxW, wk + 4), Math.min(maxW, lines.length ? bubbleW(lines, chW) * 0.8 : w)), h: szOf(task) + 16 + (wk ? 20 : 0) + (lines.length ? room : 0), top: lines.length ? room : 0, inner: w, wk };
     };
     const meadow = zone.meadow.slice(0, meadowMax);
-    const MR = { x: X(106), y: skyH + 22, w: X(216) - X(106), h: H - 8 - skyH - 22 };
+    const MR = { x: X(106), y: skyH + 22, w: X(216) - X(106), h: floor - skyH - 22 };
     flock(meadow, MR, (task) => foot(task, MR.w), pos, avoid);
     // Review sheep wait below the path, by the gate and the dog.
     const gate = zone.gate.slice(0, gateMax);
-    const GR = { x: X(240), y: belowPath, w: X(302) - X(240), h: Y(AH - 4) - belowPath };
+    const GR = { x: X(240), y: belowPath, w: X(302) - X(240), h: Math.min(Y(AH - 4), floor) - belowPath };
     flock(gate, GR, (task) => foot(task, GR.w), pos, avoid);
     for (const task of [...meadow, ...gate]) {
       sheepOpts.set(task.id, { sc: sc * sizeK(task), path: status(task) === "walk" ? PATH : 0, wake: wakeW(task) });
@@ -1536,14 +1631,14 @@ export default class MissionDashboard extends View {
       if (msg) talk.push({ task, msg, alert: st === "alert" });
     }
 
-    // Gate with the sheepdog (review): the gate opens for the scenes, else while sheep are there.
-    const open = hs.gate.rev ?? zone.gate.length + zone.past.length > 0;
+    // Gate with the sheepdog (review): open only while someone passes through.
+    const open = hs.gate.rev || this.gateOpen("rev");
     kids.push(at(X(L.reviewGate[0]), Y(L.reviewGate[1]), spr(open ? "gate2-open" : "gate2-closed", 16, 16, sc)));
     // Its reviewer tag (and wag) shows only while a task is in review; otherwise it just sits by the gate.
     const inReview = new Set(d.tasks.filter((k) => k.state === "review").map((k) => k.id));
     const rev = d.agents.filter((a) => a.role === "reviewer" && a.status !== "gone" && inReview.size);
     const dogA = rev.filter((a) => inReview.has(a.task)).pop() || rev.pop() || null;
-    const dg = hs.a.dog, dd = this.dim("dog"), dp = pt(dg?.at || L.dog), dmo = { duration: hs.move, easing: "linear" };
+    const dg = hs.a.dog, dd = this.dim("dog"), dp = pt(dg?.at || L.dog), dmo = { duration: dg?.mv ?? hs.move, easing: "linear" };
     actors.set("dog", { x: dp.x, y: dp.y, w: dd.w * sc, h: dd.h * sc });
     kids.push(this.clickable(v_flex().id("dog").absolute().left(dp.x).top(dp.y).items_center().gap(1).transition("left", dmo).transition("top", dmo)
       .child(this.fig("dog", "other", dg?.pose ? POSES[dg.pose] || [dg.pose] : dogA?.status === "working" ? ["wag1", "wag2"] : ["sit"], dg?.dir || "r", sc, dg?.pose === "run" ? 260 : 600))
@@ -1571,17 +1666,28 @@ export default class MissionDashboard extends View {
       sheepOpts.set(task.id, { sc: sc * sizeK(task) });
     });
 
-    // Sheep, noting which ones just changed spot so they trot (facing their way) instead of sliding.
+    // Sheep, noting which ones just changed spot: they trot there along their route (trotKick plays the legs),
+    // each leg facing its own way, instead of sliding through the fences.
     const now = Date.now();
-    if (now >= this.trotUntil) this.trot.clear();
     const sheepRects = new Map();
     if (this.size) for (const [id, p0] of pos) {
       const task = d.tasks.find((k) => k.id === id), o = sheepOpts.get(id), act = hs.a[`s:${id}`];
       if ((this.pending.has(id) || this.pendingMerge.has(id)) && !act) continue; // not arrived yet: its scene brings it
-      const p = act?.at ? pt(act.at) : p0, prev = this.pos.get(id);
-      if (!act?.at && prev && now < this.trotUntil && Math.hypot(p.x - prev.x, p.y - prev.y) > 4) this.trot.set(id, p.x < prev.x ? "l" : "r");
-      this.pos.set(id, p);
-      kids.push(this.sheep(t, task, p.x, p.y, { ...o, trot: act?.at ? undefined : this.trot.get(id), act }));
+      const prev = this.pos.get(id);
+      if (act?.at) this.trot.delete(id);
+      let tr = this.trot.get(id);
+      if (!act?.at && !tr && prev && now < this.trotUntil && Math.hypot(p0.x - prev.x, p0.y - prev.y) > 4) {
+        const k = o.sc / sc, r = route(toArt(prev), toArt(p0), { w: SHP * k, h: SHP * k }, RG), pts = [prev, ...r.map((l) => pt(l.at))];
+        pts[pts.length - 1] = p0;
+        const gates = r.map((l) => l.gate);
+        tr = { i: -1, from: prev, legs: pts.slice(1).map((q, j) => ({ ...q, gate: gates[j], dir: q.x < pts[j].x - 1 ? "l" : q.x > pts[j].x + 1 ? "r" : null,
+          ms: Math.max(80, Math.round(Math.hypot(q.x - pts[j].x, q.y - pts[j].y) / sc * PACE)) })) };
+        tr.legs.forEach((l, j) => { l.dir ||= tr.legs[j - 1]?.dir || tr.legs.find((x) => x.dir)?.dir || "r"; });
+        this.trot.set(id, tr);
+      }
+      const leg = tr && tr.i >= 0 ? tr.legs[tr.i] : null, p = act?.at ? pt(act.at) : leg || (tr ? tr.from : p0);
+      this.pos.set(id, { x: p.x, y: p.y });
+      kids.push(this.sheep(t, task, p.x, p.y, { ...o, trot: tr ? (leg || tr.legs[0]).dir : undefined, mv: leg?.ms, act }));
       const s = SHP * o.sc;
       sheepRects.set(id, { x: p.x, y: p.y, w: s + (o.path || 0) * o.sc, h: s + (o.tag === false ? 0 : 15), sp: s });
       // Its wake button blocks bubbles (the sheep's own included) like a label.
