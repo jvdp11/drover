@@ -122,7 +122,7 @@ function flock(tasks, R, foot, out, avoid = []) {
     for (let k = 0; k < 28; k++) {
       const r = { x: R.x + (rnd() + rnd()) / 2 * Math.max(0, R.w - f.w), y: R.y + (rnd() + rnd()) / 2 * Math.max(0, R.h - f.h), w: f.w, h: f.h };
       const gap = placed.reduce((g, q) => Math.min(g, rectGap(r, q)), Infinity);
-      const v = Math.min(gap, want) - 0.06 * Math.hypot(r.x + f.w / 2 - mx, r.y + f.h / 2 - my) - 0.05 * avoid.reduce((s, q) => s + area(r, q, 3), 0);
+      const v = Math.min(gap, want) - 0.06 * Math.hypot(r.x + f.w / 2 - mx, r.y + f.h / 2 - my) - [...avoid, ...placed].reduce((s, q) => s + area(r, q, 3), 0);
       if (v > score) { score = v; best = r; }
     }
     placed.push(best);
@@ -1455,7 +1455,7 @@ export default class MissionDashboard extends View {
           .px(r.wide ? 4 * r.s : 0).text_size(r.ts).font_weight(800).text_color("#3b2412")
           .child(div().w_full().text_center().when(r.wide, (el) => el.whitespace_normal()).when(!r.wide, (el) => el.whitespace_nowrap()).child(r.text))));
     }
-    const avoid = [...deco, ...signs, { ...pt(L.dog), w: 24 * sc, h: 18 * sc + 14 }];
+    const dogP = pt(L.dog), avoid = [...deco, ...signs, { x: dogP.x - 2 * sc, y: dogP.y - 2 * sc, w: 28 * sc, h: 20 * sc + 16 }];
     // Owl perches: tree tops, then the barn roof.
     const perches = [...deco.filter((r) => r.name === "tree").map((r) => ({ x: Math.round(r.x + r.w / 2 - 8 * sc), y: Math.round(r.y + 3 * dsc - 14 * sc) })),
       { x: barnX + 24 * sc, y: barnY - 12 * sc }];
@@ -1516,10 +1516,12 @@ export default class MissionDashboard extends View {
       const st = this.sheepStatus(task, worker);
       return { msg: this.sheepMsg(task, worker, st), st };
     };
+    const wakeW = (task) => status(task) === "sleep" && task.alternatives?.length
+      ? Math.ceil(`wake: move to ${this.altLabel(task.alternatives[0])}`.length * chW * 0.9) + 14 : 0;
     const foot = (task, maxW) => {
       const walk = status(task) === "walk", w = szOf(task) + (walk ? PATH * sc * sizeK(task) : 0);
-      const lines = wrap(talker(task).msg, 26, 2);
-      return { w: Math.max(w, Math.min(maxW, lines.length ? bubbleW(lines, chW) * 0.8 : w)), h: szOf(task) + 16 + (lines.length ? room : 0), top: lines.length ? room : 0, inner: w };
+      const lines = wrap(talker(task).msg, 26, 2), wk = wakeW(task);
+      return { w: Math.max(w, Math.min(maxW, wk + 4), Math.min(maxW, lines.length ? bubbleW(lines, chW) * 0.8 : w)), h: szOf(task) + 16 + (wk ? 20 : 0) + (lines.length ? room : 0), top: lines.length ? room : 0, inner: w, wk };
     };
     const meadow = zone.meadow.slice(0, meadowMax);
     const MR = { x: X(106), y: skyH + 22, w: X(216) - X(106), h: H - 8 - skyH - 22 };
@@ -1529,7 +1531,7 @@ export default class MissionDashboard extends View {
     const GR = { x: X(240), y: belowPath, w: X(302) - X(240), h: Y(AH - 4) - belowPath };
     flock(gate, GR, (task) => foot(task, GR.w), pos, avoid);
     for (const task of [...meadow, ...gate]) {
-      sheepOpts.set(task.id, { sc: sc * sizeK(task), path: status(task) === "walk" ? PATH : 0 });
+      sheepOpts.set(task.id, { sc: sc * sizeK(task), path: status(task) === "walk" ? PATH : 0, wake: wakeW(task) });
       const { msg, st } = talker(task);
       if (msg) talk.push({ task, msg, alert: st === "alert" });
     }
@@ -1581,6 +1583,9 @@ export default class MissionDashboard extends View {
       kids.push(this.sheep(t, task, p.x, p.y, { ...o, trot: act?.at ? undefined : this.trot.get(id), act }));
       const s = SHP * o.sc;
       sheepRects.set(id, { x: p.x, y: p.y, w: s + (o.path || 0) * o.sc, h: s + (o.tag === false ? 0 : 15), sp: s });
+      // Its wake button blocks bubbles (the sheep's own included) like a label.
+      const wk = o.wake && !act?.pose ? o.wake : 0;
+      if (wk) blocks.push({ x: p.x + s / 2 - wk / 2, y: p.y + s + 15, w: wk, h: 18 });
     }
 
     // Speech bubbles: up to two wrapped lines, placed so they never cover each other, labels or other sheep.
