@@ -57,6 +57,10 @@ Then press `ctrl-shift-l` in Herdr until the drover layout shows. After editing 
 switch layouts twice to reload. Settings: `~/.config/drover/config.json` (the gear on the left rail
 opens the settings dialog); probe cache: `~/.local/state/drover/fleet.json`.
 
+**Herdr gallery:** `herdr/` is a shareable Herdr layout (layout, mods,
+[RECIPE.md](herdr/RECIPE.md), preview). Installed from the gallery it still needs this repo's
+engine: clone it and run `./install.sh`.
+
 ## Commands
 
 ```sh
