@@ -4,7 +4,19 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, spaces, theme, props, openOverlay } from "herdr";
+import { exec, spaces, theme, props, openOverlay, run, setShared } from "herdr";
+// The project's pasture as its own tab: one per space, found again by its name (only that tab is ever selected).
+// A reused tab gets the asked-for mission through shared "drover.pasture.pick".
+function openPasture(s, folder, name, extra = {}) {
+  const tab = s.tabs?.find((tb) => tb.name === "pasture" && tb.named);
+  if (tab) {
+    if (!s.active) run("space.select", { id: s.id });
+    if (!tab.active) run("tab.select", { id: tab.id });
+    if (extra.mission || extra.showArchived) setShared("drover.pasture.pick", { folder, ...extra, at: Date.now() });
+    return;
+  }
+  run("tab.new", { name: "pasture", space: s.id, mod: "drover-dashboard", props: { space: s.id, folder, name, ...extra } });
+}
 
 const STATE = { running: "working", starting: "working", stopped: "idle", done: "done" };
 
@@ -89,8 +101,10 @@ export default class ProjectHome extends View {
     const running = missions.filter((m) => m.state === "running");
     const start = () => openOverlay({ mod: "drover-mission", kind: "dialog", width: 600, height: 380,
       props: { space: s?.id, folder: this.folder(), name } });
-    const dashboard = (mission, showArchived = false) => openOverlay({ mod: "drover-dashboard", kind: "dialog", width: 1120, height: 760,
-      props: { space: s?.id, folder: s?.folder ?? this.folder(), name: s?.name ?? name, showArchived, ...(mission ? { mission } : {}) } });
+    const dashboard = (mission, showArchived = false) => s ? openPasture(s, s.folder || this.folder(), s.name ?? name,
+      { ...(showArchived ? { showArchived } : {}), ...(mission ? { mission } : {}) })
+      : openOverlay({ mod: "drover-dashboard", kind: "dialog", width: 0.95, height: 0.95,
+        props: { folder: this.folder(), name, showArchived, ...(mission ? { mission } : {}) } });
 
     return v_flex().id("root").size_full().bg(t.background).overflow_y_scrollbar()
       .child(v_flex().w_full().max_w(980).mx_auto().p(28).gap(18)
@@ -110,7 +124,7 @@ export default class ProjectHome extends View {
               .children(gh ? [div().px(6).rounded(4).border(1).border_color(t.border).child(`GitHub · ${gh}`)] : [])))
           .child(h_flex().id("dashboard").gap(6).items_center().px(12).py(8).rounded(8)
             .cursor_pointer().bg(`${t.accent}22`).text_color(t.accent).hover((st) => st.bg(`${t.accent}44`))
-            .tooltip("Open mission dashboard · Esc to close").on_click(() => dashboard())
+            .tooltip("Open the mission dashboard tab").on_click(() => dashboard())
             .child(svg("mods/drover-rail/horns.svg").size(14).text_color(t.accent))
             .child(div().text_size(12).font_semibold().child("Open dashboard"))))
         // Start a mission.

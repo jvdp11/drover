@@ -4,7 +4,19 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex } from "gpui-base";
-import { spaces, agents, theme, run, openOverlay, shared, home, panes } from "herdr";
+import { spaces, agents, theme, run, openOverlay, shared, setShared, home, panes } from "herdr";
+// The project's pasture as its own tab: one per space, found again by its name (only that tab is ever selected).
+// A reused tab gets the asked-for mission through shared "drover.pasture.pick".
+function openPasture(s, folder, name, extra = {}) {
+  const tab = s.tabs?.find((tb) => tb.name === "pasture" && tb.named);
+  if (tab) {
+    if (!s.active) run("space.select", { id: s.id });
+    if (!tab.active) run("tab.select", { id: tab.id });
+    if (extra.mission || extra.showArchived) setShared("drover.pasture.pick", { folder, ...extra, at: Date.now() });
+    return;
+  }
+  run("tab.new", { name: "pasture", space: s.id, mod: "drover-dashboard", props: { space: s.id, folder, name, ...extra } });
+}
 // Show an agent's terminal: focus its pane (switching space/tab first); with no pane, peek it.
 function showTerminal(terminal) {
   const pane = panes().find((p) => p.terminal === terminal);
@@ -54,8 +66,7 @@ export default class Rail extends View {
       .on_click(() => run("space.select", { id: s.id }))
       .when(project, (el) => el.on_mouse_down("right", (_e, cx) => {
         cx.stop_propagation();
-        openOverlay({ mod: "drover-dashboard", kind: "dialog", width: 1120, height: 760,
-          props: { space: s.id, folder: s.folder, name: s.name } });
+        openPasture(s, s.folder, s.name);
       }))
       // The active project gets a bar on the rail's edge, like a selected tab.
       .child(div().w(3).h(s.active ? 22 : 0).rounded(2).bg(t.accent).spring("height", { response: 260, damping: 0.8 }))

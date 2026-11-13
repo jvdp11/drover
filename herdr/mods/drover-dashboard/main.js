@@ -1,9 +1,9 @@
-// Per-project mission flow. Props: { folder, name, space, mission?, showArchived?, demo? }.
-// openOverlay({ mod: "drover-dashboard", kind: "dialog", width: 1120, height: 760,
-//   props: { folder, name, space, mission } });
+// Per-project mission flow. Props: { folder, name, space, mission?, showArchived?, popout?, demo? }.
+// Shown as the project's "pasture" tab (tab.new with mod), as a dialog (ctrl-shift-d, props.overlay),
+// or alone in its own window (drover dashboard --window: props.popout).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { exec, theme, props, closeOverlay, run, shared, machines, panes, spaces, notify, playSound } from "herdr";
+import { exec, theme, props, closeOverlay, run, shared, machines, panes, spaces, notify, playSound, window as appWindow } from "herdr";
 // Show an agent's terminal: focus its pane (switching space/tab first); with no pane, peek it.
 function showTerminal(terminal) {
   const pane = panes().find((p) => p.terminal === terminal);
@@ -370,8 +370,59 @@ export default class MissionDashboard extends View {
     this.phase = this.timeOfDay(); this.owl = null; this.perches = [];
     this.ducks = null; this.duckSeed = null; this.duckGen = 0; this.duckSpots = []; this.duckPond = null;
     this.tick(cx);
-    cx.timer.every(POLL_MS, (cx) => { this.load(cx); this.tick(cx); });
+    this.pickAt = Date.now();
+    cx.timer.every(POLL_MS, (cx) => { this.takePick(cx); this.load(cx); this.tick(cx); });
     cx.timer.every(2000, (cx) => this.peek(cx));
+  }
+
+  // Another mod reused this project's pasture tab and asked for a mission (shared "drover.pasture.pick").
+  takePick(cx) {
+    const pk = shared("drover.pasture.pick"), p = props() ?? {};
+    if (!pk || pk.folder !== p.folder || !(pk.at > this.pickAt)) return;
+    this.pickAt = pk.at;
+    if (pk.showArchived && !this.showArchived) { this.showArchived = true; this.selected = null; }
+    if (pk.mission) this.select(pk.mission, cx);
+  }
+
+  // Close the dialog this is in, if it is one (a tab or the pop-out window stays).
+  dismiss() { const o = props()?.overlay; if (o) closeOverlay(o); }
+
+  // Leave where this dashboard is shown: its dialog, or its own "pasture" tab (never another tab).
+  leave() {
+    const p = props() ?? {};
+    if (p.overlay) { closeOverlay(p.overlay); return; }
+    if (p.popout) return;
+    const s = spaces().find((x) => x.id === p.space) ?? spaces().find((x) => x.folder === p.folder && !x.machine);
+    const tab = s?.tabs.find((tb) => tb.name === "pasture" && tb.named);
+    if (tab && s.tabs.length > 1) run("tab.close", { id: tab.id, confirmed: true });
+  }
+
+  popOut(cx) {
+    const p = props() ?? {};
+    if (!p.folder) return;
+    const args = ["dashboard", "--window", "--repo", p.folder];
+    if (this.selected) args.push("--mission", this.selected);
+    cx.spawn(async (cx) => {
+      try {
+        const r = await exec("drover", args, { timeout: 20000 });
+        if (r.code !== 0) throw new Error(r.stderr?.trim() || `drover exited ${r.code}`);
+        this.leave();
+      } catch (e) { notify({ title: "Pop out failed", body: String(e?.message ?? e), level: "error" }); }
+      cx.notify();
+    });
+  }
+
+  // The pop-out window draws its own window buttons (Herdr's titlebar is off there).
+  windowControls(t) {
+    const w = appWindow();
+    const b = (id, icon, tip, cmd) => div().id(id).w(28).h(28).flex_none().rounded(7).flex().items_center().justify_center()
+      .cursor_pointer().tooltip(tip).hover((s) => s.bg(t.hover))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => run(cmd))
+      .child(svg(`mods/workspace-chrome/${icon}.svg`).size(icon === "x" ? 15 : 13).text_color(t.muted));
+    return h_flex().flex_none().gap(2).items_center()
+      .children(w?.platform === "macos" ? [] : [b("win-min", "minus", "Minimize", "window.minimize"),
+        b("win-max", "square", w?.maximized ? "Restore" : "Maximize", "window.maximize"),
+        b("win-close", "x", "Close window", "window.close")]);
   }
 
   select(id, cx) {
@@ -889,7 +940,7 @@ export default class MissionDashboard extends View {
         .children((this.peekLines.length ? this.peekLines : ["…"]).map((l, i) => div().id(`tail-${i}`).whitespace_normal().text_color(t.muted).child(l || " "))))
       .children(wake ? [wake] : [])
       .child(h_flex().gap(6).flex_wrap()
-        .child(btn("terminal", "Open terminal", t.accent, () => { closeOverlay(props().overlay); showTerminal(terminal); }, !terminal))
+        .child(btn("terminal", "Open terminal", t.accent, () => { this.dismiss(); showTerminal(terminal); }, !terminal))
         .child(btn("move", this.moveOpen ? "Replace coordinator… ▴" : "Replace coordinator… ▾", t.ansi5 || t.accent, (cx) => { this.moveOpen = !this.moveOpen; cx.notify(); }, !cands.length)))
       .children(picker ? [picker] : [])
       .children(this.result ? [div().id("panel-result").p(8).rounded(6).whitespace_normal().text_size(10)
@@ -929,7 +980,7 @@ export default class MissionDashboard extends View {
       .opacity(disabled ? 0.4 : 1).child(label);
     const row = (k, v) => h_flex().gap(8).text_size(11).child(div().w(60).flex_none().text_color(t.dim).child(k))
       .child(div().flex_1().min_w(0).whitespace_normal().child(v));
-    const buttons = [btn("terminal", "Open terminal", t.accent, () => { closeOverlay(props().overlay); showTerminal(terminal); }, !terminal)];
+    const buttons = [btn("terminal", "Open terminal", t.accent, () => { this.dismiss(); showTerminal(terminal); }, !terminal)];
     if (task.state === "done") buttons.push(btn("review", "Review", t.ansi5 || t.accent, (cx) => this.act(["task", "review", task.id], cx)));
     if (task.state === "approved") buttons.push(btn("merge", "Merge", t.done, (cx) => this.act(["task", "merge", task.id], cx)));
     if (!["merged", "dropped"].includes(task.state)) buttons.push(this.confirmDrop
@@ -990,7 +1041,7 @@ export default class MissionDashboard extends View {
           .children(go ? [div().id(`needs-act-${i}`).flex_none().px(8).py(3).rounded(5).cursor_pointer().bg(`${c}22`)
             .text_size(10).font_semibold().text_color(c).hover((s) => s.bg(`${c}44`))
             .on_click((_e, cx) => merge ? (this.openPanel(r.task, cx), this.act(["task", "merge", r.task], cx))
-              : (closeOverlay(props().overlay), showTerminal(term)))
+              : (this.dismiss(), showTerminal(term)))
             .tooltip(r.action || "")
             .child(merge ? "Retry merge" : "Open terminal →")] : []);
       }));
@@ -1046,7 +1097,7 @@ export default class MissionDashboard extends View {
       .cursor_pointer().hover((s) => s.bg(t.hover)).on_click(() => {
         const terminal = this.terminal(a);
         if (!terminal) return;
-        closeOverlay(props().overlay);
+        this.dismiss();
         showTerminal(terminal);
       }));
   }
@@ -1067,13 +1118,16 @@ export default class MissionDashboard extends View {
       .child(div().flex_1())
       .children(m ? [this.progress(t)] : [])
       .child(this.worldToggles(t))
-      .children(m && ["done", "stopped"].includes(m.state) && !m.archived && !this.demo ? [
+      .children(p.popout ? [] : [div().id("pop-out").flex_none().px(9).py(5).rounded(6).cursor_pointer().text_size(11)
+        .text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip("Open the pasture in its own window, to put anywhere on the screen")
+        .on_click((_e, cx) => this.popOut(cx)).child("Pop out")])
+      .children(m && ["done", "stopped"].includes(m.state) && !m.archived && !this.demo && !p.popout ? [
         div().id("archive-mission").flex_none().px(9).py(5).rounded(6).cursor_pointer().text_size(11).text_color(t.muted)
           .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.archive(cx))
           .child(this.archiving ? "Archiving…" : "Archive")] : [])
-      .child(div().id("close").w(28).h(28).flex_none().rounded(7).flex().items_center().justify_center().cursor_pointer()
-        .tooltip("Close (Esc)").hover((s) => s.bg(t.hover)).on_click(() => closeOverlay(props().overlay))
-        .child(svg("mods/workspace-chrome/x.svg").size(15).text_color(t.muted)));
+      .child(p.popout ? this.windowControls(t) : p.overlay ? div().id("close").w(28).h(28).flex_none().rounded(7).flex().items_center()
+        .justify_center().cursor_pointer().tooltip("Close (Esc)").hover((s) => s.bg(t.hover)).on_click(() => closeOverlay(props().overlay))
+        .child(svg("mods/workspace-chrome/x.svg").size(15).text_color(t.muted)) : div());
   }
 
   // Header: pasture time of day (Auto / Day / Night) and sounds, remembered per viewer.
@@ -1333,7 +1387,7 @@ export default class MissionDashboard extends View {
     return el.tooltip(tip).when(!!this.terminal(a), (el) => el.cursor_pointer().on_click(() => {
       const terminal = this.terminal(a);
       if (!terminal) return;
-      closeOverlay(props().overlay);
+      this.dismiss();
       showTerminal(terminal);
     }));
   }
@@ -1922,7 +1976,7 @@ export default class MissionDashboard extends View {
     return v_flex().id("root").relative().track_focus(this.handle).size_full().min_h(0).bg(t.background).text_color(t.foreground)
       .on_key_down((e, cx) => {
         if (e.key !== "escape") return;
-        if (this.picker) { this.picker = false; cx.notify(); } else if (this.panel) this.closePanel(cx); else closeOverlay(props().overlay);
+        if (this.picker) { this.picker = false; cx.notify(); } else if (this.panel) this.closePanel(cx); else if (props()?.overlay) closeOverlay(props().overlay); else return;
         cx.stop_propagation();
       })
       .child(this.header(t, p))
