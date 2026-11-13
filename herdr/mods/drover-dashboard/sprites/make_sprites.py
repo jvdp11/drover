@@ -865,6 +865,61 @@ def fence2(kind):
     return outline(g, WOOD_OUT)
 
 
+# Signposts: a plank board (one wide plank with darker grain and nails) on one post,
+# or a wide single-plank board on two posts. The dashboard draws the label text
+# on the board, inside rows 2..10 (2..21 for the wide one), x 2..w-3.
+SIGN_WIDTHS = (32, 48, 64)
+
+
+def sign_post(g, x, top, bottom):
+    for y in range(top, bottom + 1):
+        g[y][x] = "L"
+        g[y][x + 1] = g[y][x + 2] = "M"
+        g[y][x + 3] = "m"
+
+
+def sign_board(g, x0, x1, planks, seed):
+    """Planks stacked from row 2, each `n` rows tall, a dark seam between them."""
+    y = 2
+    for i, n in enumerate(planks):
+        for yy in range(y, y + n):
+            for x in range(x0, x1 + 1):
+                g[yy][x] = "M" if yy == y + n - 1 else "L"
+        # grain: short darker streaks along the plank, staggered per row
+        for yy in range(y, y + n - 1):
+            x = x0 + 2 + int(noise(i, yy, seed) * 6)
+            while x < x1 - 3:
+                ln = 2 + int(noise(x, yy, seed + 1) * 4)
+                for k in range(ln):
+                    if x + k < x1 - 1:
+                        g[yy][x + k] = "m" if noise(x + k, yy, seed + 2) > 0.8 else "M"
+                x += ln + 5 + int(noise(x, yy, seed + 3) * 9)
+        # nails near both ends, in the middle row of the plank
+        ny = y + (n - 1) // 2
+        g[ny][x0 + 1] = g[ny][x1 - 1] = "I"
+        y += n
+        if i < len(planks) - 1:
+            for x in range(x0, x1 + 1):
+                g[y][x] = "q"
+            y += 1
+
+
+def sign(w):
+    g = canvas(w, 18)
+    c = w // 2 - 2
+    sign_post(g, c, 1, 16)
+    sign_board(g, 1, w - 2, (9,), w)
+    return outline(g, WOOD_OUT)
+
+
+def sign_wide():
+    g = canvas(96, 32)
+    for x in (10, 82):
+        sign_post(g, x, 1, 30)
+    sign_board(g, 1, 94, (20,), 96)
+    return outline(g, WOOD_OUT)
+
+
 def gate2(is_open):
     g = canvas(16, 16)
     for x in (0, 13):
@@ -1261,6 +1316,9 @@ def sprites_v2():
     add("fence2-h", fence2("h"), WOOD)
     add("fence2-v", fence2("v"), WOOD)
     add("fence2-post", fence2("post"), WOOD)
+    for w in SIGN_WIDTHS:
+        add("sign-%d" % w, sign(w), WOOD)
+    add("sign-wide", sign_wide(), WOOD)
     add("gate2-open", gate2(True), WOOD)
     add("gate2-closed", gate2(False), WOOD)
     add("tree", tree(), TREE_PAL)
@@ -1295,6 +1353,7 @@ SIZES = {"sheep2-": (24, 24), "sheep2-lamb": (16, 16), "drover2-": (24, 32), "do
          "owl-": (16, 16), "path-": (16, 16), "fence2-": (16, 16), "gate2-": (16, 16),
          "tree": (32, 40), "bush": (16, 12), "pond": (48, 24), "rock": (12, 8),
          "hills": (256, 40), "barn2-window": (8, 8), "barn2-": (64, 56), "hay": (12, 10),
+         "sign-32": (32, 18), "sign-48": (48, 18), "sign-64": (64, 18), "sign-wide": (96, 32),
          "smoke": (8, 12), "sun": (16, 16), "moon": (16, 16), "star": (4, 4),
          "cloud": (16, 16), "rain": (16, 16), "rainbow": (64, 32), "heart": (8, 8),
          "confetti": (8, 8), "sparkle": (8, 8), "note": (8, 8)}
@@ -1315,7 +1374,7 @@ def preview_groups(v1, v2):
         groups.append(("Drover: " + fam, [n for n in v2 if n.startswith("drover2-%s-" % fam)], "grass"))
     groups.append(("Dog", [n for n in v2 if n.startswith("dog2-")], "grass"))
     groups.append(("Owl", [n for n in v2 if n.startswith("owl-")], "grass"))
-    scen = ("path-", "fence2-", "gate2-", "tree", "bush", "pond", "rock", "barn2", "hay", "smoke")
+    scen = ("path-", "fence2-", "gate2-", "sign-", "tree", "bush", "pond", "rock", "barn2", "hay", "smoke")
     groups.append(("Scenery", [n for n in v2 if n.startswith(scen)], "grass"))
     groups.append(("Hills", ["hills"], "sky"))
     groups.append(("Sky", [n for n in v2 if n.startswith(("sun", "moon", "star", "cloud", "rain"))], "sky"))
