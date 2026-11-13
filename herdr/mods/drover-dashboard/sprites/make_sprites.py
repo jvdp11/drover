@@ -1258,6 +1258,39 @@ def rainbow():
     return g
 
 
+# --------------------------------------------------------------------- duck --
+# 12x10, facing right. B/b/d body light/mid/shade, T tail, H/h head, E eye, K/k beak, F feet,
+# A/a water ripple (pond colours). Two variants: white duck and brown mallard (green head).
+DUCK_PAL = {
+    "white": {"B": "#fffdf6", "b": "#e6dece", "d": "#c2b7a3", "T": "#e6dece", "H": "#fffdf6", "h": "#e6dece",
+              "E": "#2b2228", "K": "#f4a93b", "k": "#d07a22", "F": "#ee8f2e", "q": "#6e6252", "p": "#a65a1a",
+              "A": "#c8e9f2", "a": "#86c8e0"},
+    "mallard": {"B": "#b48a5e", "b": "#946b45", "d": "#6e4e30", "T": "#4a3a2c", "H": "#33965f", "h": "#216e45",
+                "E": "#1c1618", "K": "#ecd04a", "k": "#c0a022", "F": "#ee8f2e", "q": "#3a2a1c", "p": "#a65a1a",
+                "A": "#c8e9f2", "a": "#86c8e0"},
+}
+DUCK_OUT = {"B": "q", "b": "q", "d": "q", "T": "q", "H": "q", "h": "q", "K": "p", "k": "p", "F": "p"}
+DUCK_BODY = ["TTBBBBBBB...", "TBBBBBBBBB..", ".BbBBBBBbB..", "..bdbbbbd..."]
+DUCK = {
+    "swim1": [".....hHH....", "....HHHEKK..", "....HHHHKk..", ".T..BHHH....", "TTBBBBBBB...", "TBBBBBBBBB..",
+              ".bbbbbbbbb..", "..AAA..AA...", ".......a..a.", "............"],
+    "swim2": ["............", ".....hHH....", "....HHHEKK..", "....HHHHKk..", ".T..BHHH....", "TTBBBBBBB...",
+              "TBBBBBBBBB..", ".bbbbbbbbb..", "A..AA..AAA..", "..a......a.."],
+    "walk1": [".....hHH....", "....HHHEKK..", "....HHHHKk..", ".T..BHHH....", "TTBBBBBBB...", "TBBBBBBBBB..",
+              ".BbBBBBBbB..", "..bdbbbbd...", "...F...F....", "..FF..FFF..."],
+    "walk2": [".....hHH....", "....HHHEKK..", "....HHHHKk..", ".T..BHHH....", "TTBBBBBBB...", "TBBBBBBBBB..",
+              ".BbBBBBBbB..", "..bdbbbbd...", "....F.F.....", "...FF.FF...."],
+    "preen": ["............", "............", ".....hHH....", "....HHEHK...", ".T.BBHHHKk..", "TTBBBBBBBB..",
+              "TBBBBBBBBB..", ".BbBBBBBbB..", "..bdbbbbd...", "...F...F...."],
+    "sleep": ["............", "............", "............", "...BBBBB....", ".TBBBBBBHH..", "TBBBBBBHHEK.",
+              ".bbbbbbbbbK.", "..bbbbbbb...", ".AA..AAA.A..", "............"],
+}
+
+
+def duck(pose):
+    return outline(to_grid(DUCK[pose]), DUCK_OUT)
+
+
 # ----------------------------------------------------------------------- fx --
 FX_PAL = {"R": "#ee5a6f", "r": "#ffb3bf", "q": "#8c2338",
           "Y": "#ffe27a", "W": "#ffffff", "o": "#f2a93b",
@@ -1340,6 +1373,9 @@ def sprites_v2():
     add("rain1", rain(0), SKY_PAL)
     add("rain2", rain(1), SKY_PAL)
     add("rainbow", rainbow(), SKY_PAL)
+    for kind, pal in DUCK_PAL.items():
+        for pose in DUCK:
+            add("duck-%s-%s" % (kind, pose), duck(pose), pal, True)
     add("heart", to_grid(HEART), FX_PAL)
     add("confetti1", to_grid(CONFETTI[0]), FX_PAL)
     add("confetti2", to_grid(CONFETTI[1]), FX_PAL)
@@ -1355,7 +1391,7 @@ SIZES = {"sheep2-": (24, 24), "sheep2-lamb": (16, 16), "drover2-": (24, 32), "do
          "hills": (256, 40), "barn2-window": (8, 8), "barn2-": (64, 56), "hay": (12, 10),
          "sign-32": (32, 18), "sign-48": (48, 18), "sign-64": (64, 18), "sign-wide": (96, 32),
          "smoke": (8, 12), "sun": (16, 16), "moon": (16, 16), "star": (4, 4),
-         "cloud": (16, 16), "rain": (16, 16), "rainbow": (64, 32), "heart": (8, 8),
+         "duck-": (12, 10), "cloud": (16, 16), "rain": (16, 16), "rainbow": (64, 32), "heart": (8, 8),
          "confetti": (8, 8), "sparkle": (8, 8), "note": (8, 8)}
 
 
@@ -1373,6 +1409,7 @@ def preview_groups(v1, v2):
     for fam in FAMILIES:
         groups.append(("Drover: " + fam, [n for n in v2 if n.startswith("drover2-%s-" % fam)], "grass"))
     groups.append(("Dog", [n for n in v2 if n.startswith("dog2-")], "grass"))
+    groups.append(("Ducks", [n for n in v2 if n.startswith("duck-")], "grass"))
     groups.append(("Owl", [n for n in v2 if n.startswith("owl-")], "grass"))
     scen = ("path-", "fence2-", "gate2-", "sign-", "tree", "bush", "pond", "rock", "barn2", "hay", "smoke")
     groups.append(("Scenery", [n for n in v2 if n.startswith(scen)], "grass"))
@@ -1394,6 +1431,9 @@ def preview_anims():
     anims.append(("drover2 idle", ["drover2-anthropic-idle1", "drover2-anthropic-idle2"], 1200, False))
     anims.append(("dog2 run", ["dog2-run%d" % i for i in range(1, 5)], 400, True))
     anims.append(("dog2 wag", ["dog2-wag1", "dog2-wag2"], 300, False))
+    for kind in DUCK_PAL:
+        anims.append(("duck %s swim" % kind, ["duck-%s-swim1" % kind, "duck-%s-swim2" % kind], 700, False))
+        anims.append(("duck %s walk" % kind, ["duck-%s-walk1" % kind, "duck-%s-walk2" % kind], 400, True))
     anims.append(("owl fly", ["owl-fly%d" % i for i in range(1, 5)], 500, True))
     anims.append(("sheep2 graze", ["sheep2-google-graze1", "sheep2-google-graze2"], 800, False))
     anims.append(("smoke", ["smoke1", "smoke2", "smoke3"], 900, False))

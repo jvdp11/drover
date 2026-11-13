@@ -36,6 +36,10 @@ const flip = (a, b, w, h, sc, period = 700) => div().relative().w(w * sc).h(h * 
   .child(div().absolute().left(0).top(0).loop("opacity", { from: -8, to: 9, period, easing: "linear" }).child(spr(b, w, h, sc)));
 // Pasture motion: zone changes trot over TROT ms; walking paths step every STEP_MS.
 const TROT = 1600, STEP_MS = 110, LINE = 13, OWL_FLY = 4500;
+// Ducks at the pond (12x10 sprites). Positions on the water are sprite top-left, in pond-sprite pixels; they paddle a
+// ring of points slowly (DUCK_SWIM ms per pixel), and now and then waddle ashore to a spot beside the pond (DUCK_WALK).
+const DUCK_SWIM = 420, DUCK_WALK = 320;
+const DUCK_RING = [[6, 9], [10, 6], [18, 5], [26, 6], [31, 9], [26, 11], [18, 12], [10, 11]], DUCK_REST = [[14, 8], [24, 9]];
 
 // --- Events and actors ---
 // Task size S/M/L draws the same sheep at 0.8x / 1x / 1.2x.
@@ -364,6 +368,7 @@ export default class MissionDashboard extends View {
     // World: time of day and sound are remembered per viewer; the owl flies at night.
     this.timeMode = store.get("time", "auto"); this.sound = store.get("sound", "off") === "on";
     this.phase = this.timeOfDay(); this.owl = null; this.perches = [];
+    this.ducks = null; this.duckSeed = null; this.duckGen = 0; this.duckSpots = []; this.duckPond = null;
     this.tick(cx);
     cx.timer.every(POLL_MS, (cx) => { this.load(cx); this.tick(cx); });
     cx.timer.every(2000, (cx) => this.peek(cx));
@@ -492,12 +497,78 @@ export default class MissionDashboard extends View {
 
   // Every poll: redraw when the time of day turns; at night start the owl's round.
   tick(cx) {
+    this.ensureDucks(cx);
     const ph = this.timeOfDay();
     if (ph !== this.phase) { this.phase = ph; cx.notify(); }
     if (ph === "night" && !this.owl) {
       this.owl = { st: props()?.demo && props()?.owl === "perch" ? "perch" : "away", n: 0 };
       if (this.owl.st === "away") cx.timer.after(1200, (cx) => this.owlStep(cx));
     }
+  }
+
+  // --- the ducks: one or two live at the pond (seeded per mission). Each leg is one cx.timer.after; the movement
+  // itself is a native transition and the paddling / waddling a native flip, so there is no redraw timer. ---
+  ensureDucks(cx) {
+    const d = this.data, p = props() || {};
+    if (!d) return;
+    const id = d.mission?.id || d.project || "pasture";
+    if (this.duckSeed === id) return;
+    this.duckSeed = id; this.duckGen++;
+    const h = hash(`${id}:ducks`), gen = this.duckGen, night = this.timeOfDay() === "night";
+    this.ducks = Array.from({ length: p.demo ? 2 : 1 + (h >> 3 & 1) }, (_, i) => ({
+      kind: (h + i) % 2 ? "mallard" : "white", st: night ? "sleep" : "swim", plan: null, dir: i ? "l" : "r", mv: 0, legs: 0, want: 2 + i,
+      act: "preen", ring: i ? -1 : 1, k: (i * 3) % DUCK_RING.length, at: night ? DUCK_REST[i] : DUCK_RING[(i * 3) % DUCK_RING.length],
+      rs: (hash(`${id}:duck${i}`) || 1),
+    }));
+    // Demo: props.ducks "ashore" starts the first duck on the grass and keeps it there a while (for screenshots).
+    const stay = p.demo && p.ducks === "ashore" && !night;
+    if (stay) this.ducks[0].st = "ashore";
+    this.ducks.forEach((dk, i) => cx.timer.after(stay && !i ? 90000 : 900 + i * 1100, (cx) => this.duckStep(i, gen, cx)));
+  }
+
+  // The spot beside the pond, in pond-sprite pixels, where a duck leaves and enters the water.
+  duckExit(i) {
+    const sp = this.duckSpots[i], pd = this.duckPond;
+    if (!sp || !pd) return DUCK_RING[0];
+    return [Math.max(6, Math.min(31, Math.round((sp.x - pd.x) / pd.s))), Math.max(6, Math.min(11, Math.round((sp.y - pd.y) / pd.s) - 4))];
+  }
+
+  duckStep(i, gen, cx) {
+    const dk = this.ducks?.[i];
+    if (!dk || this.duckGen !== gen) return;
+    const night = this.timeOfDay() === "night", spot = this.duckSpots[i];
+    const rnd = () => (dk.rs = (dk.rs * 1664525 + 1013904223) >>> 0) / 4294967296;
+    const swimTo = (q, plan = null) => {
+      const dx = q[0] - dk.at[0];
+      if (Math.abs(dx) > 0.5) dk.dir = dx < 0 ? "l" : "r";
+      dk.mv = Math.max(700, Math.round(Math.hypot(dx, q[1] - dk.at[1]) * DUCK_SWIM));
+      dk.at = q; dk.st = "swim"; dk.plan = plan;
+      return dk.mv;
+    };
+    const ring = () => { dk.k = (dk.k + dk.ring + DUCK_RING.length) % DUCK_RING.length; dk.legs++; return swimTo(DUCK_RING[dk.k]); };
+    let ms;
+    if (dk.st === "swim" && dk.plan === "exit" && spot && !night) {
+      const pd = this.duckPond;
+      dk.dir = pd && spot.x + 6 * pd.s < pd.x + 24 * pd.s ? "l" : "r";
+      dk.st = "out"; ms = dk.mv = Math.round(DUCK_WALK * Math.hypot((spot.x - pd.x) / pd.s - dk.at[0], (spot.y - pd.y) / pd.s - dk.at[1]));
+    } else if (dk.st === "swim" || dk.st === "back" || dk.st === "sleep") {
+      dk.plan = null;
+      if (night) {
+        const rest = DUCK_REST[i % DUCK_REST.length];
+        if (dk.at === rest) { dk.st = "sleep"; dk.mv = 0; ms = 15000; } else ms = swimTo(rest);
+      } else if (dk.st !== "back" && spot && dk.legs >= dk.want) { dk.legs = 0; dk.want = 3 + Math.floor(rnd() * 4); ms = swimTo(this.duckExit(i), "exit"); }
+      else ms = ring();
+    } else if (dk.st === "out") {
+      dk.st = "ashore"; dk.mv = 0; dk.act = rnd() < 0.5 ? "preen" : "peck"; ms = 5000 + Math.round(rnd() * 7000);
+    } else {
+      // Ashore: waddle back to where the duck left the water.
+      const to = this.duckExit(i), pd = this.duckPond;
+      const sx = spot && pd ? (spot.x - pd.x) / pd.s : to[0], sy = spot && pd ? (spot.y - pd.y) / pd.s : to[1];
+      dk.dir = to[0] < sx ? "l" : "r"; dk.st = "back"; dk.at = to;
+      dk.mv = ms = Math.round(DUCK_WALK * Math.hypot(sx - to[0], sy - to[1])) + 300;
+    }
+    cx.notify();
+    cx.timer.after(Math.max(300, ms), (cx) => this.duckStep(i, gen, cx));
   }
 
   // The owl: waits off the left edge, flies in to a perch (a tree or the barn roof), sits a while, flies off right.
@@ -511,18 +582,26 @@ export default class MissionDashboard extends View {
     cx.timer.after(next[1], (cx) => this.owlStep(cx));
   }
 
-  // clear | cloudy (an agent this mission uses is at 70%+) | overcast (90%+) | rain (one is out) | rainbow (all merged).
-  weather() {
+  // clear | cloudy (an agent this mission uses is at 70%+) | overcast (90%+) | rain (one is out) | rainbow (all merged),
+  // with the reason, shown when hovering the sky.
+  weatherInfo() {
     const d = this.data, m = d.mission, p = props() || {};
-    if (p.demo && p.weather) return p.weather;
-    if (!m) return "clear";
+    const nm = (a) => a ? a[0].toUpperCase() + a.slice(1) : "An agent";
+    if (!m) return { wx: p.demo && p.weather ? p.weather : "clear", why: "Clear sky" };
     const tasks = d.tasks.filter((k) => k.state !== "dropped");
-    if (tasks.length && tasks.every((k) => k.state === "merged")) return "rainbow";
     const used = new Set([...d.agents.filter((a) => a.status !== "gone").map((a) => a.agent),
       ...tasks.filter((k) => ACTIVE.includes(k.state)).map((k) => k.agent)].filter(Boolean));
-    if ((d.capacity || []).some((c) => used.has(c.agent))) return "rain";
-    const pct = Math.max(0, ...this.usageRows().filter((u) => used.has(u.agent)).map((u) => Number(u.used_percent ?? u.pct)));
-    return pct >= 90 ? "overcast" : pct >= 70 ? "cloudy" : "clear";
+    const outs = (d.capacity || []).filter((c) => used.has(c.agent));
+    const top = this.usageRows().filter((u) => used.has(u.agent)).map((u) => ({ agent: u.agent, pct: Number(u.used_percent ?? u.pct) }))
+      .filter((u) => Number.isFinite(u.pct)).sort((x, y) => y.pct - x.pct)[0];
+    const pct = top?.pct || 0;
+    const wx = p.demo && p.weather ? p.weather : tasks.length && tasks.every((k) => k.state === "merged") ? "rainbow"
+      : outs.length ? "rain" : pct >= 90 ? "overcast" : pct >= 70 ? "cloudy" : "clear";
+    const why = wx === "rainbow" ? "Rainbow: every task merged"
+      : wx === "rain" ? `Rain: ${outs.length ? outs.map((c) => `${c.name || nm(c.agent)} is out ${c.until ? untilText(c.until) : ""}`.trim()).join(" · ") : "an agent is out of capacity"}`
+      : wx === "cloudy" || wx === "overcast" ? `Clouds: ${nm(top?.agent)}${top ? ` at ${Math.round(top.pct)}%` : " is running high"}`
+      : "Clear sky: no agent this mission uses is near its limit";
+    return { wx, why };
   }
 
   fxEl(k, sc) { return spr(k, 8, 8, sc); }
@@ -1406,7 +1485,7 @@ export default class MissionDashboard extends View {
     const blocks = []; // laid-out rects that speech bubbles must not cover
     const zone = { pen: [], meadow: [], gate: [], past: [], barn: [] };
     for (const k of m ? d.tasks : []) if (k.state !== "dropped") zone[ZONE[k.state] || "meadow"].push(k);
-    const ph = this.timeOfDay(), night = ph === "night", wx = this.weather();
+    const ph = this.timeOfDay(), night = ph === "night", wi = this.weatherInfo(), wx = wi.wx;
     const top = [], glow = []; // above the time-of-day tint: labels, HUD, bubbles, effects / moon, stars, lit window, owl
     const soft = []; // scenery rects bubbles prefer to leave clear
     const empty = !ACTIVE.some((s) => d.tasks.some((x) => m && x.state === s));
@@ -1428,17 +1507,22 @@ export default class MissionDashboard extends View {
     for (let x = 0; x < W; x += 256 * hsc) kids.push(at(x, skyH - 40 * hsc, spr("hills", 256, 40, hsc)));
     if (!night && wx !== "rain") kids.push(at(sunX, sunY, spr("sun", 16, 16, sc)));
     kids.push(div().absolute().left(0).right(0).top(skyH).h(sc).bg("#5aa84a"));
-    const cloud = (name, x, drift, period) => kids.push(div().absolute().top(Math.max(2, oy + sc)).loop("left", { from: Math.round(x), to: Math.round(x + drift * sc), period, easing: "ease-in-out" })
-      .child(spr(name, 16, 16, sc)));
-    // Weather keeps to the sky's right corner by the sun, clear of the HUD.
-    if (wx === "cloudy") { cloud("cloud", sunX - 12 * sc, 5, 11000); cloud("cloud", sunX - 34 * sc, -4, 14000); }
-    if (wx === "overcast") { cloud("cloud", sunX - 3 * sc, -3, 9000); cloud("cloud", sunX - 18 * sc, 4, 12000); cloud("cloud", sunX - 34 * sc, -4, 15000); }
-    if (wx === "rain") for (const [f, drift] of [[-2, 3], [-18, -3], [-34, 3]]) {
-      const x = Math.round(sunX + f * sc), y = Math.max(2, oy + sc);
-      kids.push(div().absolute().top(y).loop("left", { from: x, to: x + drift * sc, period: 10000 })
-        .child(spr("cloud-dark", 16, 16, sc))
-        .child(div().absolute().left(0).top(8 * sc).child(flip("rain1", "rain2", 16, 16, sc, 300)))
-        .child(div().absolute().left(0).top(22 * sc).child(flip("rain2", "rain1", 16, 16, sc, 300))));
+    // Clouds drift slowly across the whole sky: two strips of the same clouds, one width apart, slide right together
+    // and wrap without a seam. When an agent is out the clouds are dark and light rain falls from each, down the sky band.
+    {
+      const n = { rain: Math.max(4, Math.round(W / (40 * sc))), overcast: Math.max(4, Math.round(W / (40 * sc))), cloudy: Math.max(3, Math.round(W / (56 * sc))) }[wx] || 2;
+      let cs = hash(`${m?.id || d.project}:clouds`) || 1;
+      const cr = () => (cs = (cs * 1664525 + 1013904223) >>> 0) / 4294967296;
+      const cl = Array.from({ length: n }, (_, i) => ({ x: Math.round((i + 0.15 + 0.7 * cr()) * W / n) - 8 * sc, y: Math.round(-2 * sc + 2 + (i % 3) * 1.5 * sc) }));
+      const strip = (dx) => div().absolute().left(dx).top(0).w(W).h(skyH).children(cl.map((c) => {
+        const rainH = skyH - c.y - 12 * sc;
+        return div().absolute().left(c.x).top(c.y).w(16 * sc).h(16 * sc)
+          .children(wx === "rain" && rainH > 0 ? [8, -8].map((o, j) => div().absolute().left(o * sc).top(12 * sc).w(16 * sc).h(rainH).overflow_hidden()
+            .child(j ? flip("rain2", "rain1", 16, 16, sc, 300) : flip("rain1", "rain2", 16, 16, sc, 300))) : [])
+          .child(spr(wx === "rain" ? "cloud-dark" : "cloud", 16, 16, sc));
+      }));
+      kids.push(div().absolute().left(0).top(0).w(W).h(skyH).loop("left", { from: 0, to: W, period: Math.round(W * 110) }).child(strip(0)).child(strip(-W)));
+      kids.push(div().id("weather").absolute().left(0).right(0).top(0).h(skyH).tooltip(wi.why));
     }
     if (night) {
       let ss = hash(`${m?.id || d.project}:stars`) || 1;
@@ -1694,6 +1778,38 @@ export default class MissionDashboard extends View {
       const wk = o.wake && !act?.pose ? o.wake : 0;
       if (wk) blocks.push({ x: p.x + s / 2 - wk / 2, y: p.y + s + 15, w: wk, h: 18 });
     }
+
+    // Ducks: paddle on the pond (the spots below are where they may come ashore: grass beside it, clear of the path,
+    // fences, signs, scenery, the zones' sheep and the barnyard). Each duck keeps its own spot, so they never overlap.
+    const pond = deco.find((r) => r.name === "pond");
+    this.duckPond = pond ? { x: pond.x, y: pond.y, s: dsc } : null;
+    this.duckSpots = [];
+    if (pond && this.ducks) {
+      const dw = 12 * dsc, dh = 10 * dsc, ps = pond;
+      const cand = [[8, 19], [20, 19], [31, 19], [-10, 9], [46, 9], [-10, 3], [46, 3]].map(([cx0, cy0]) => ({ x: ps.x + cx0 * dsc, y: ps.y + cy0 * dsc, w: dw, h: dh }));
+      const bad = [...keep, ...deco.filter((r) => r !== pond), ...signs, ...hayRects, yard, MR, GR, ...sheepRects.values()];
+      const taken = [], off = hash(`${m?.id || d.project}:shore`) % cand.length;
+      this.ducks.forEach((dk, i) => {
+        for (let j = 0; j < cand.length; j++) {
+          const r = cand[(off + j) % cand.length];
+          if (r.x < 4 || r.x + r.w > W - 4 || r.y + r.h > H - 12 * sc || bad.some((q) => area(r, q, 2) > 0) || taken.some((q) => area(r, q, 2 * dsc) > 0)) continue;
+          taken.push(r); this.duckSpots[i] = { x: r.x, y: r.y };
+          break;
+        }
+      });
+    }
+    if (pond && this.ducks) this.ducks.forEach((dk, i) => {
+      const sp = this.duckSpots[i], land = sp && (dk.st === "out" || dk.st === "ashore");
+      const x = land ? sp.x : pond.x + dk.at[0] * dsc, y = land ? sp.y : pond.y + dk.at[1] * dsc;
+      const mo = { duration: dk.mv, easing: "linear" };
+      const poses = dk.st === "swim" ? ["swim1", "swim2"] : dk.st === "sleep" ? ["sleep"] : dk.st === "ashore" ? (dk.act === "peck" ? ["walk1", "preen"] : ["preen", "walk1"]) : ["walk1", "walk2"];
+      const f = poses.map((q) => `duck-${dk.kind}-${q}${dk.dir === "l" ? "-l" : ""}`);
+      const period = dk.st === "swim" ? 1000 : dk.st === "ashore" ? (dk.act === "peck" ? 700 : 1500) : 380;
+      kids.push(div().id(`duck-${i}`).absolute().left(Math.round(x)).top(Math.round(y)).transition("left", mo).transition("top", mo)
+        .tooltip(dk.st === "sleep" ? "A duck, asleep" : "A duck")
+        .child(poses.length > 1 ? flip(f[0], f[1], 12, 10, dsc, period) : spr(f[0], 12, 10, dsc))
+        .children(dk.st === "sleep" ? [div().absolute().left(8 * dsc).top(-4 * dsc).loop("opacity", { from: 0.25, to: 1, period: 1800 }).child(spr("zzz", 8, 8, Math.max(1, dsc - 1)))] : []));
+    });
 
     // Speech bubbles: up to two wrapped lines, placed so they never cover each other, labels or other sheep.
     const p = Math.max(2, sc), tailH = 3 * p + 1;
