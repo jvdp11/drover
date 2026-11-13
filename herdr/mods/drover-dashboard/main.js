@@ -184,7 +184,7 @@ function untilText(until) {
   if (d.toDateString() === now.toDateString()) return `until ${hm}`;
   const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
   return d.toDateString() === tomorrow.toDateString() ? `until tomorrow ${hm}`
-    : `until ${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${hm}`;
+    : `until ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()]} ${hm}`;
 }
 const identity = (a) => a ? `${a.agent || "agent"}@${a.machine || "?"} · ${a.model || "model unknown"}` : "Not assigned";
 function hue(t, name) {
@@ -1175,8 +1175,8 @@ export default class MissionDashboard extends View {
   // walk / sit / sleep / alert / gone for a task's sheep.
   sheepStatus(task, worker) {
     const d = this.data;
-    if (worker?.status === "gone") return "gone";
     if (!["working", "changes", "done", "review"].includes(task.state)) return "sit";
+    if (worker?.status === "gone") return "gone";
     const agent = worker?.agent || task.agent, machine = worker?.machine || task.machine;
     if (d.impediments.some((r) => (r.task === task.id || r.who === task.id) && r.kind === "gone")) return "gone";
     if (worker?.status === "blocked" || d.impediments.some((r) => (r.task === task.id || r.who === task.id)
@@ -1239,7 +1239,7 @@ export default class MissionDashboard extends View {
       const pose = st === "gone" || st === "walk" ? "sit" : st;
       body = box().child(div().absolute().left(0).top(0)
         .when(st === "alert", (el) => el.loop("top", { from: 0, to: -3 * sc, period: 560, easing: "ease-out" }))
-        .child(this.fig("sheep", fam, [pose], face, sc))
+        .child(this.fig("sheep", fam, o.poses || [pose], face, sc, o.poses ? 1500 : 500))
         .children(st === "alert" ? [div().absolute().left(face === "l" ? (W0 - 1) * sc : -7 * sc).top(3 * sc)
           .child(spr("bubble-alert", 8, 8, sc))] : []))
         .children(st === "sleep" ? [div().absolute().right(face === "l" ? (W0 - 1) * sc : -7 * sc).top(-sc)
@@ -1310,10 +1310,6 @@ export default class MissionDashboard extends View {
     const pt = (q) => (typeof q[0] === "string" ? { x: barnX + q[1] * sc, y: barnY + q[2] * sc } : { x: X(q[0]), y: Y(q[1]) });
     const actors = new Map(); // key -> screen rect of drovers and the dog, for effects and speech bubbles
     const blocks = []; // laid-out rects that speech bubbles must not cover
-    const label = (text, x, y) => {
-      blocks.push({ x, y, w: text.length * chW * 1.05 + 8, h: 15 });
-      return div().absolute().left(x).top(y).px(3).rounded(3).text_size(10).font_semibold().text_color("#ffffffd0").child(text);
-    };
     const zone = { pen: [], meadow: [], gate: [], past: [], barn: [] };
     for (const k of m ? d.tasks : []) if (k.state !== "dropped") zone[ZONE[k.state] || "meadow"].push(k);
     const ph = this.timeOfDay(), night = ph === "night", wx = this.weather();
@@ -1329,14 +1325,14 @@ export default class MissionDashboard extends View {
     ];
     // Sky and weather. Hills are far off: drawn one scale smaller, their strip tiles along the horizon.
     const hsc = Math.max(1, Math.min(sc - 1, Math.floor((skyH - 6) / 30)));
-    const sunX = W - 16 * sc - 14, sunY = Math.max(4, Math.floor((skyH - 16 * sc) / 2) + sc);
+    const sunX = W - 16 * sc - 14, sunY = Math.max(3, Math.floor((skyH - 12 * sc - 16 * sc) / 2));
     if (wx === "rainbow" && !night) {
       const rsc = Math.max(1, Math.min(sc, Math.floor((skyH + 6 * hsc) / 32)));
-      kids.push(at(Math.round(W * 0.56 - 32 * rsc), skyH + 4 * hsc - 32 * rsc, spr("rainbow", 64, 32, rsc)));
+      kids.push(at(Math.round(W * 0.56 - 32 * rsc), skyH - 2 * hsc - 32 * rsc, spr("rainbow", 64, 32, rsc)));
     }
     if (night) glow.push(at(sunX, sunY, spr("moon", 16, 16, sc)));
-    else if (wx !== "rain") kids.push(at(sunX, sunY, spr("sun", 16, 16, sc)));
     for (let x = 0; x < W; x += 256 * hsc) kids.push(at(x, skyH - 40 * hsc, spr("hills", 256, 40, hsc)));
+    if (!night && wx !== "rain") kids.push(at(sunX, sunY, spr("sun", 16, 16, sc)));
     kids.push(div().absolute().left(0).right(0).top(skyH).h(sc).bg("#5aa84a"));
     const cloud = (name, x, drift, period) => kids.push(div().absolute().top(Math.max(2, oy + sc)).loop("left", { from: Math.round(x), to: Math.round(x + drift * sc), period, easing: "ease-in-out" })
       .child(spr(name, 16, 16, sc)));
@@ -1383,23 +1379,58 @@ export default class MissionDashboard extends View {
     hrun("path-h", Y(py), X(pgx) + T, X(turn));
     hrun("path-h", Y(rgy), X(turn) + T, X(door));
     tile("path-se", X(pgx), Y(py)); tile("path-sw", X(turn), Y(py)); tile("path-ne", X(turn), Y(rgy)); tile("path-nw", X(door), Y(rgy));
-    hrun("fence2-h", skyH - 12 * sc, 0, barnX + 8 * sc);
+    hrun("fence2-h", skyH - 12 * sc, 0, W);
     hrun("fence2-h", H - 12 * sc, 0, W);
     vrun("fence2-v", -6 * sc, home0.y + dm0.h * sc + 18, H - 6 * sc);
     vrun("fence2-v", W - 10 * sc, barnBot, H - 6 * sc);
     vrun("fence2-v", X(92), Y(pgy) + 8 * sc, H - 6 * sc);
     vrun("fence2-v", X(rgx), skyH - 4 * sc, Y(rgy) + 2 * sc);
     vrun("fence2-v", X(rgx), Y(rgy) + 14 * sc, H - 6 * sc);
-    // Trees, a pond, bushes and rocks: seeded per mission, kept off the path, fences, labels, anchors and
+    // Wooden signposts name the zones (sign-32/48/64 on one post, sign-wide on two; see make_sprites.py).
+    // Each picks the narrowest board, then the smallest scale, its label fits on; the text is drawn on the planks.
+    const signs = [];
+    const sign = (text, x, y, s0 = dsc, xMax = W - 12 * sc) => {
+      const ts = s0 >= 3 ? 12 : 10, tw = text.length * chW * ts / 10 * 1.06 + 4;
+      let f = { sw: 64, s: s0 + 2 };
+      fit: for (let s = s0; s <= s0 + 2; s++) for (const sw of [32, 48, 64]) if ((sw - 4) * s >= tw) { f = { sw, s }; break fit; }
+      const r = { text, ts, ...f, w: f.sw * f.s, h: 18 * f.s, y: Math.round(y) };
+      r.x = Math.round(Math.min(x, xMax - r.w));
+      signs.push(r);
+      return r;
+    };
+    const penMax = 8, meadowMax = 9, gateMax = 6;
+    const penSign = sign(`PEN · queued${zone.pen.length > penMax ? ` · +${zone.pen.length - penMax}` : ""}`, X(8), Y(pgy) + 15 * sc);
+    const meadowSign = sign(`MEADOW · working${zone.meadow.length > meadowMax ? ` · +${zone.meadow.length - meadowMax}` : ""}`, X(108), skyH + 5 * sc);
+    const belowPath = Y(rgy) + T + sc;
+    sign(`GATE · review${zone.gate.length > gateMax ? ` · +${zone.gate.length - gateMax}` : ""}`, X(242), belowPath, dsc, X(302));
+    const pastSign = sign(`APPROVED${zone.past.length > 2 ? ` · +${zone.past.length - 2}` : ""}`, X(306), belowPath);
+    const barnSign = sign(zone.barn.length ? `merged ×${zone.barn.length}` : "barn", X(242), skyH + 5 * sc, dsc, barnX - 2);
+    if (empty) {
+      const text = !d.missions.length ? "No missions yet. Start one from this project's home to send some sheep out."
+        : !m ? "Pick a mission above." : "All sheep home. Start a mission to send some out.";
+      const s = Math.max(2, Math.min(sc, Math.floor((X(216) - X(106)) / 96))), w = 96 * s, h = 32 * s;
+      const y0 = meadowSign.y + meadowSign.h + sc, y1 = Y(py) + 2 * sc;
+      signs.push({ text, wide: true, s, sw: 96, ts: s >= 3 ? 13 : 11, w, h, x: Math.round((X(106) + X(216)) / 2 - w / 2), y: Math.round(Math.max(y0, (y0 + y1) / 2 - h / 2)) });
+    }
+    // Barnyard, left of the barn above the path: hay bales stacked against the barn wall (one per merge, up to 4)
+    // and the merged sheep resting beside them.
+    const bh = L.barn[3];
+    const hayN = Math.min(4, zone.barn.filter((k) => !this.pendingMerge.has(k.id)).length);
+    const hayRects = Array.from({ length: hayN }, (_, i) => ({ x: barnX - (i % 2 + 1) * 13 * sc, y: barnY + (bh - 10) * sc - Math.floor(i / 2) * 9 * sc, w: 12 * sc, h: 10 * sc }));
+    // The yard hugs the barn's foot so the merged sheep rest as one small flock, whatever the pane height.
+    const yms = Math.max(2, sc - 1) * SHP, barnBot0 = barnY + bh * sc;
+    const yard = { x: X(240), y: Math.max(barnSign.y + barnSign.h + sc, barnBot0 - 2 * yms - 4 * sc), w: barnX - 2 * sc - X(240) };
+    yard.h = Math.max(SHP, Math.min(Y(rgy) + 2 * sc, barnBot0 + yms) - yard.y);
+    // Trees, a pond, bushes and rocks: seeded per mission, kept off the path, fences, signs, anchors, the barnyard and
     // the drover's corner; the flocks below steer clear of them.
     let ds = hash(`${m?.id || d.project}:scenery`) || 1;
     const dr = () => (ds = (ds * 1664525 + 1013904223) >>> 0) / 4294967296;
     const keep = [...used, { x: 0, y: 0, w: W, h: hudY + 26 }, { x: 0, y: home0.y - 6, w: home0.x + dm0.w * sc + 240, h: dm0.h * sc + 24 },
-      { x: 0, y: Y(pgy) - 14, w: X(104), h: H }, { x: X(106), y: skyH, w: 170, h: 24 }, { x: X(240), y: skyH, w: 140, h: 24 },
+      { x: 0, y: Y(pgy) - 14, w: X(104), h: H }, ...signs, ...hayRects, yard, { x: X(304), y: belowPath, w: W, h: H },
       { x: X(L.barn[0] - 12), y: 0, w: W, h: H },
       { x: X(L.meadow[0]), y: Y(L.meadow[1]), w: X(rgx + 16) - X(L.meadow[0]), h: Y(rgy) - Y(L.meadow[1]) + 30 * sc },
       ...["meadow", "reviewGate", "reviewZone", "dog", "past"].map((k) => { const q = pt(L[k]); return { x: q.x - 4 * sc, y: q.y - 4 * sc, w: 32 * sc, h: 32 * sc }; }),
-      ...(empty ? [{ x: X(104), y: Y(SKY + 30) - 6, w: 116 * sc, h: 70 }] : [])];
+    ];
     const deco = [];
     const place = (name, w, h, n, y0, y1) => {
       for (let i = 0; i < n; i++) for (let k = 0; k < 40; k++) {
@@ -1415,7 +1446,16 @@ export default class MissionDashboard extends View {
     place("rock", 12, 8, 4, skyH + 10, H - 8 * sc);
     deco.sort((a, b) => a.y + a.h - (b.y + b.h));
     for (const r of deco) { kids.push(at(r.x, r.y, spr(r.name, r.sw, r.sh, dsc))); soft.push(r); }
-    const avoid = [...deco, { ...pt(L.dog), w: 24 * sc, h: 18 * sc + 14 }];
+    // Signs stand in the grass behind the sheep; flocks and speech bubbles keep clear of them.
+    for (const r of signs) {
+      blocks.push(r);
+      kids.push(div().absolute().left(r.x).top(r.y).w(r.w).h(r.h)
+        .child(spr(r.wide ? "sign-wide" : `sign-${r.sw}`, r.sw, r.wide ? 32 : 18, r.s))
+        .child(div().absolute().left(2 * r.s).top(2 * r.s).w((r.sw - 4) * r.s).h((r.wide ? 20 : 9) * r.s).flex().items_center().justify_center()
+          .px(r.wide ? 4 * r.s : 0).text_size(r.ts).font_weight(800).text_color("#3b2412")
+          .child(div().w_full().text_center().when(r.wide, (el) => el.whitespace_normal()).when(!r.wide, (el) => el.whitespace_nowrap()).child(r.text))));
+    }
+    const avoid = [...deco, ...signs, { ...pt(L.dog), w: 24 * sc, h: 18 * sc + 14 }];
     // Owl perches: tree tops, then the barn roof.
     const perches = [...deco.filter((r) => r.name === "tree").map((r) => ({ x: Math.round(r.x + r.w / 2 - 8 * sc), y: Math.round(r.y + 3 * dsc - 14 * sc) })),
       { x: barnX + 24 * sc, y: barnY - 12 * sc }];
@@ -1459,11 +1499,9 @@ export default class MissionDashboard extends View {
     // Pen (queued).
     kids.push(div().absolute().left(X(4)).top(Y(100)).w(96 * sc).h(Y(AH - 4) - Y(100)).bg("#5aa84a66"));
     for (let i = 0; i < 6; i++) kids.push(at(X(4 + i * 16), Y(pgy), spr(X(4 + i * 16) === X(pgx) ? (hs.gate.pen ? "gate2-open" : "gate2-closed") : "fence2-h", 16, 16, sc)));
-    const penMax = 8;
-    top.push(label(`PEN · queued${zone.pen.length > penMax ? ` · +${zone.pen.length - penMax}` : ""}`, X(6), Y(86) - 8));
     const pen = zone.pen.slice(0, penMax);
     const waitsOf = (task) => (task.depends_on || []).filter((id) => d.tasks.find((x) => x.id === id)?.state !== "merged");
-    flock(pen, { x: X(6), y: Y(104), w: X(98) - X(6), h: Y(AH - 6) - Y(104) + rest },
+    flock(pen, { x: X(6), y: penSign.y + penSign.h + sc, w: X(98) - X(6), h: Y(AH - 6) - penSign.y - penSign.h - sc + rest },
       (task) => ({ w: Math.max(szOf(task), 50), h: szOf(task) + (waitsOf(task).length ? 30 : 16), top: 0 }), pos, avoid);
     for (const task of pen) {
       const w = waitsOf(task);
@@ -1483,63 +1521,52 @@ export default class MissionDashboard extends View {
       const lines = wrap(talker(task).msg, 26, 2);
       return { w: Math.max(w, Math.min(maxW, lines.length ? bubbleW(lines, chW) * 0.8 : w)), h: szOf(task) + 16 + (lines.length ? room : 0), top: lines.length ? room : 0, inner: w };
     };
-    const meadowMax = 9, gateMax = 6;
-    top.push(label(`MEADOW · working${zone.meadow.length > meadowMax ? ` · +${zone.meadow.length - meadowMax}` : ""}`, X(108), skyH + 6));
     const meadow = zone.meadow.slice(0, meadowMax);
     const MR = { x: X(106), y: skyH + 22, w: X(216) - X(106), h: H - 8 - skyH - 22 };
     flock(meadow, MR, (task) => foot(task, MR.w), pos, avoid);
-    top.push(label(`GATE · review${zone.gate.length > gateMax ? ` · +${zone.gate.length - gateMax}` : ""}`, X(242), skyH + 6));
+    // Review sheep wait below the path, by the gate and the dog.
     const gate = zone.gate.slice(0, gateMax);
-    const GR = { x: X(240), y: skyH + 22, w: X(302) - X(240), h: Y(AH - 4) - skyH - 22 };
+    const GR = { x: X(240), y: belowPath, w: X(302) - X(240), h: Y(AH - 4) - belowPath };
     flock(gate, GR, (task) => foot(task, GR.w), pos, avoid);
     for (const task of [...meadow, ...gate]) {
       sheepOpts.set(task.id, { sc: sc * sizeK(task), path: status(task) === "walk" ? PATH : 0 });
       const { msg, st } = talker(task);
       if (msg) talk.push({ task, msg, alert: st === "alert" });
     }
-    if (empty) {
-      const line = !d.missions.length ? "No missions yet. Start one from this project's home to send some sheep out."
-        : !m ? "Pick a mission above." : "All sheep home. Start a mission to send some out.";
-      top.push(div().absolute().left(X(104)).top(Y(SKY + 30)).w(116 * sc).flex().justify_center()
-        .child(div().px(12).py(7).rounded(8).bg("#00000038").text_color("#ffffff").text_size(13).font_semibold().whitespace_normal().text_center().child(line)));
-    }
 
     // Gate with the sheepdog (review): the gate opens for the scenes, else while sheep are there.
     const open = hs.gate.rev ?? zone.gate.length + zone.past.length > 0;
     kids.push(at(X(L.reviewGate[0]), Y(L.reviewGate[1]), spr(open ? "gate2-open" : "gate2-closed", 16, 16, sc)));
-    const rev = d.agents.filter((a) => a.role === "reviewer"), dogA = rev[rev.length - 1];
+    // Its reviewer tag shows only while a review runs; otherwise (mission done, reviewer gone) it just sits by the gate.
+    const rev = d.agents.filter((a) => a.role === "reviewer"), lastRev = rev[rev.length - 1];
+    const dogA = lastRev && lastRev.status !== "gone" && m?.state === "running" ? lastRev : null;
     const dg = hs.a.dog, dd = this.dim("dog"), dp = pt(dg?.at || L.dog), dmo = { duration: hs.move, easing: "linear" };
     actors.set("dog", { x: dp.x, y: dp.y, w: dd.w * sc, h: dd.h * sc });
     kids.push(this.clickable(v_flex().id("dog").absolute().left(dp.x).top(dp.y).items_center().gap(1).transition("left", dmo).transition("top", dmo)
-      .opacity(dogA?.status === "gone" ? 0.45 : 1)
       .child(this.fig("dog", "other", dg?.pose ? POSES[dg.pose] || [dg.pose] : dogA?.status === "working" ? ["wag1", "wag2"] : ["sit"], dg?.dir || "r", sc, dg?.pose === "run" ? 260 : 600))
-      .child(tag(dogA ? dogA.who : "dog")),
+      .children(dogA ? [tag(dogA.who)] : []),
       dogA, dogA ? `${dogA.who} · reviewer\n${dogA.agent || "agent"}${dogA.model ? ` / ${dogA.model}` : ""}\nmachine ${dogA.machine || "—"}\n${dogA.status}\n${dogA.msg || ""}`.trim() : "Sheepdog · no reviewer right now"));
     blocks.push({ x: dp.x, y: dp.y, w: dd.w * sc, h: dd.h * sc + 14 }, { x: X(L.reviewGate[0]), y: Y(L.reviewGate[1]), w: 16 * sc, h: 16 * sc });
 
-    // Barn (door opens for the merge scene) with the merged sheep sitting at its foot and hay bales beside it; approved sheep wait below.
+    // Barn (door opens for the merge scene) with the barnyard beside it; approved sheep wait below the path.
     // The chimney smokes while the mission runs; at night the hayloft window is lit (overlay at 28,14, see make_sprites.py).
-    const bh = L.barn[3];
     kids.push(div().absolute().left(barnX + 43 * sc).top(barnY + 2 * sc).w(5 * sc).h(8 * sc).bg("#8a3b30").border(1).border_color("#4a1b1c"));
     kids.push(at(barnX, barnY, spr(hs.barn ? "barn2-open" : "barn2-closed", 64, 56, sc)));
     if (m?.state === "running") kids.push(at(barnX + 41 * sc, barnY - 10 * sc, flip3("smoke1", "smoke2", "smoke3", 8, 12, sc, 1800)));
     if (night) glow.push(at(barnX + 28 * sc, barnY + 14 * sc, spr("barn2-window-lit", 8, 8, sc)));
     blocks.push({ x: barnX, y: barnY, w: L.barn[2] * sc, h: bh * sc });
-    const hay = Math.min(6, zone.barn.filter((k) => !this.pendingMerge.has(k.id)).length);
-    for (let i = 0; i < hay; i++) {
-      const hx = barnX - (i % 3 + 1) * 13 * sc, hy = barnY + (bh - 10) * sc - Math.floor(i / 3) * 9 * sc;
-      kids.push(at(hx, hy, spr("hay", 12, 10, sc)));
-    }
-    const ms = Math.max(2, sc - 1), per = Math.max(1, Math.floor(58 * sc / (SHP * ms + 2)));
-    const mergedY = barnY + (bh + 2) * sc, mergedRows = Math.max(1, Math.ceil(Math.min(zone.barn.length, per * 2) / per));
-    zone.barn.slice(0, per * 2).forEach((task, i) => {
-      pos.set(task.id, { x: X(L.barn[0] - 6) + (i % per) * (SHP * ms + 2), y: mergedY + Math.floor(i / per) * (SHP * ms + 2) });
-      sheepOpts.set(task.id, { sc: ms, tag: false });
+    for (const r of hayRects) kids.push(at(r.x, r.y, spr("hay", 12, 10, sc)));
+    // Merged sheep rest in the barnyard, sitting or grazing, in full colour; up to as many as fit.
+    const ms = Math.max(2, sc - 1), msz = SHP * ms, fits = Math.max(1, Math.floor(yard.w / (msz + 2)) * Math.max(1, Math.floor(yard.h / (msz + 2))));
+    const yardFlock = zone.barn.slice(0, Math.max(3, Math.min(8, fits)));
+    flock(yardFlock, yard, () => ({ w: msz, h: msz, top: 0 }), pos, [...hayRects, ...signs]);
+    for (const task of yardFlock) sheepOpts.set(task.id, { sc: ms, tag: false, poses: hash(task.id) % 3 ? ["sit"] : ["graze1", "graze2"] });
+    // Approved sheep wait under their sign, below the path.
+    zone.past.slice(0, 2).forEach((task, i) => {
+      const s = SHP * sc * sizeK(task);
+      pos.set(task.id, { x: Math.round(Math.min(pastSign.x + i * (s + 4), W - 6 * sc - s)), y: pastSign.y + pastSign.h + 2 });
+      sheepOpts.set(task.id, { sc: sc * sizeK(task) });
     });
-    top.push(label(zone.barn.length ? `merged ×${zone.barn.length}` : "barn · nothing merged yet", X(L.barn[0] - 4), mergedY + mergedRows * (SHP * ms + 2)));
-    const pastY = Math.max(Y(96), mergedY + mergedRows * (SHP * ms + 2) + 22);
-    top.push(label(`APPROVED${zone.past.length > 2 ? ` · +${zone.past.length - 2}` : ""}`, X(L.barn[0] - 4), pastY));
-    zone.past.slice(0, 2).forEach((task, i) => { pos.set(task.id, { x: X(L.past[0] + i * 29), y: pastY + 16 }); sheepOpts.set(task.id, { sc: sc * sizeK(task) }); });
 
     // Sheep, noting which ones just changed spot so they trot (facing their way) instead of sliding.
     const now = Date.now();
