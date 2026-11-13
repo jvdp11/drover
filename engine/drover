@@ -1,0 +1,3408 @@
+#!/usr/bin/env python3
+"""drover: place coding agents across your machines through herdr-core (hc).
+
+Zero dependencies, Python 3.9+. Runs on the machine you coordinate from; every
+other machine is reached with `hc exec --on` / `hc run --on`.
+
+  drover config [--init | --set-json JSON]   show, create or replace the settings
+  drover probe                               ask every machine what it can do now
+  drover status                              machines + drover agents, for the panel
+  drover dashboard [--repo PATH] [--mission ID]   project mission dashboard
+  drover route ROLE [--repo PATH]            where and with what ROLE would start
+  drover run ROLE --repo PATH TASK           start it there (hc run --bg)
+  drover cleanup [--repo PATH] [--yes]       remove merged drover/* branches and worktrees
+
+Add --json for machine output (default when piped).
+"""
+
+import argparse
+import concurrent.futures
+import contextlib
+import datetime
+import glob
+import hashlib
+import inspect
+import json
+import os
+import re
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+import time
+
+VERSION = "0.1.0"
+HOME = os.path.expanduser("~")
+CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")), "drover", "config.json")
+STATE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.join(HOME, ".local", "state")), "drover")
+FLEET = os.path.join(STATE_DIR, "fleet.json")
+BRANCH_PREFIX = "drover/"
+PROBE_MAX_AGE = 300  # seconds before `route` probes again
+
+# Agent CLIs: how to start one interactively with a model and a first task.
+# {model} and {task} are filled in; an entry whose value is only "{model}" is
+# dropped when no model is chosen (the CLI's own default).
+DEFAULT_AGENTS = {
+    "claude": {"name": "Claude Code", "family": "anthropic", "bin": "claude", "pretrust": True,
+               "default_auto_args": ["--permission-mode", "auto"],
+               "argv": ["claude", "--model", "{model}", "{task}"], "models": ["opus", "sonnet", "haiku"]},
+    "codex": {"name": "Codex", "family": "openai", "bin": "codex", "pretrust": True,
+              # Its sandboxed modes cannot write a worktree's git dir (it lives in the main repo's
+              # .git) or reach the hc socket, so nothing milder lets a worker commit and report.
+              "default_auto_args": ["--dangerously-bypass-approvals-and-sandbox"],
+              "argv": ["codex", "--no-daemon", "--model", "{model}", "{task}"], "models": []},
+    "cursor": {"name": "Cursor", "family": "cursor", "bin": "cursor-agent", "pretrust": True,
+               "default_auto_args": ["--force"],
+               "argv": ["cursor-agent", "--model", "{model}", "{task}"], "models": []},
+    "copilot": {"name": "Copilot", "family": "github", "bin": "copilot", "pretrust": True,
+                "default_auto_args": ["--allow-all"],
+                "argv": ["copilot", "--model", "{model}", "-i", "{task}"], "models": []},
+}
+
+DEFAULT_CONFIG = {
+    "version": 1,
+    # Per machine (hc name; this computer by its hostname). Unknown machines
+    # get "defaults".
+    "machines": {},
+    "machine_defaults": {
+        "enabled": True,      # may run drover agents at all
+        "durable": False,     # may host long runs that must survive you leaving
+        "max_agents": 4,      # drover agents at once
+    },
+    # Roles: an ordered chain of agent/model choices, and where they prefer to run.
+    "roles": {
+        "coordinator": {"durable": True, "prefer": [],
+                        "chain": [{"agent": "claude", "model": "opus"}, {"agent": "codex", "model": None}]},
+        "worker": {"durable": False, "prefer": [],
+                   "chain": [{"agent": "codex", "model": None}, {"agent": "claude", "model": "sonnet"},
+                             {"agent": "cursor", "model": None}]},
+        "reviewer": {"durable": False, "prefer": [], "other_family": True,
+                     "chain": [{"agent": "claude", "model": "opus"}, {"agent": "codex", "model": None},
+                               {"agent": "cursor", "model": None}]},
+        "mechanical": {"durable": False, "prefer": [],
+                       "chain": [{"agent": "copilot", "model": None}, {"agent": "claude", "model": "haiku"}]},
+    },
+    "placement": {
+        "avoid_battery": True,   # never place on a machine running on battery
+        "min_disk_gb": 10,       # never place where less is free
+    },
+    # Where task branches meet when work moves: "github" (the repo's origin),
+    # "nas" (a bare repo remote named below) or "direct" (hc file copies).
+    "handoff": {"mode": "github", "remote": "origin"},
+    "cleanup": {"delete_remote": True},
+    # When `drover task merge` conflicts because base moved, drover first merges base into the task
+    # branch itself; conflicts in files matching auto_union are resolved by keeping both sides.
+    "merge": {"auto_union": ["tests/*"]},
+    # Proactive quota (see usage_probe): above avoid_above_percent an agent counts as out until its
+    # window resets; with prefer_headroom, a chain choice above headroom_percent yields to a later
+    # choice that is known to have headroom. avoid_above_percent 0 and prefer_headroom false = off.
+    "quota": {"avoid_above_percent": 90, "prefer_headroom": True, "headroom_percent": 75},
+    "missions": {"archive_after_days": 7,
+                 "stuck_minutes": 20},  # blocked this long in an auto mission: move the task (0 = never)
+    "agents": DEFAULT_AGENTS,
+}
+
+
+# ---------------------------------------------------------------- helpers
+
+def die(msg, code=1):
+    print(f"drover: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def local_name():
+    return socket.gethostname().split(".")[0]
+
+
+def merged(base, over):
+    """Deep-merge `over` onto `base` (dicts only; lists and values replace)."""
+    out = dict(base)
+    for k, v in (over or {}).items():
+        out[k] = merged(base[k], v) if isinstance(base.get(k), dict) and isinstance(v, dict) else v
+    return out
+
+
+def load_config():
+    try:
+        with open(CONFIG) as f:
+            user = json.load(f)
+    except FileNotFoundError:
+        user = {}
+    except json.JSONDecodeError as e:
+        die(f"{CONFIG} is not valid JSON: {e}")
+    return merged(DEFAULT_CONFIG, user)
+
+
+def write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp-{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def machine_cfg(cfg, name):
+    return merged(cfg["machine_defaults"], cfg["machines"].get(name, {}))
+
+
+def hc(args, timeout=60):
+    """Run hc; return (code, stdout, stderr)."""
+    try:
+        p = subprocess.run(["hc", *args], capture_output=True, text=True, timeout=timeout)
+        return p.returncode, p.stdout, p.stderr
+    except FileNotFoundError:
+        die("hc (herdr-core) is not installed")
+    except subprocess.TimeoutExpired:
+        return 124, "", "timed out"
+
+
+def on_args(machine):
+    return [] if machine is None else ["--on", machine]
+
+
+def hc_target(cfg_name):
+    """hc's machine name for a drover machine name: None means this computer."""
+    return None if cfg_name == local_name() else cfg_name
+
+
+def remote_sh(machine, script, timeout=40):
+    """Run a POSIX script in that machine's login+interactive shell, so PATH has
+    the tools people installed (mise, Homebrew). Output before the marker (MOTDs,
+    fastfetch) is dropped."""
+    wrapper = 'exec "${SHELL:-/bin/sh}" -lic "$1" </dev/null 2>/dev/null'
+    code, out, err = hc(["exec", *on_args(machine), "--timeout", str(timeout), "sh", "-c", wrapper, "_",
+                         "echo __DROVER__\n" + script], timeout=timeout + 10)
+    if "__DROVER__" not in out:
+        return code or 1, "", err.strip() or "no answer"
+    return code, out.split("__DROVER__", 1)[1].lstrip("\n"), err
+
+
+def emit(data, as_json, text):
+    if as_json:
+        json.dump(data, sys.stdout, indent=2)
+        print()
+    else:
+        print(text(data))
+
+
+# ---------------------------------------------------------------- probe
+
+PROBE = r"""
+echo os=$(uname -s)
+echo arch=$(uname -m)
+echo cpus=$( (nproc || sysctl -n hw.ncpu) 2>/dev/null)
+if [ -r /proc/meminfo ]; then
+  echo mem_kb=$(awk '/MemTotal/{print $2}' /proc/meminfo)
+else
+  echo mem_kb=$(( $(sysctl -n hw.memsize) / 1024 ))
+fi
+if [ -r /proc/loadavg ]; then echo load=$(cut -d' ' -f1 /proc/loadavg)
+else echo load=$(sysctl -n vm.loadavg | awk '{print $2}'); fi
+echo disk_free_kb=$(df -Pk "$HOME" | awk 'NR==2{print $4}')
+echo home=$HOME
+power=unknown
+if command -v pmset >/dev/null 2>&1; then
+  if pmset -g batt | head -1 | grep -q 'AC Power'; then power=ac; else power=battery; fi
+else
+  bat=0; ac=0
+  for d in /sys/class/power_supply/*; do
+    [ -r "$d/type" ] || continue
+    case $(cat "$d/type") in
+      Battery) bat=1 ;;
+      Mains) [ "$(cat "$d/online" 2>/dev/null)" = 1 ] && ac=1 ;;
+    esac
+  done
+  if [ $bat = 0 ] || [ $ac = 1 ]; then power=ac; else power=battery; fi
+fi
+echo power=$power
+printf tools=
+for c in TOOLS; do command -v "$c" >/dev/null 2>&1 && printf '%s,' "$c"; done
+echo
+"""
+
+
+def probe_one(cfg, name, hc_state):
+    t0 = time.time()
+    m = {"name": name, "local": name == local_name(), "online": False, "probed_at": int(t0)}
+    if hc_state not in (None, "connected"):
+        m["error"] = f"hc: {hc_state}"
+        return m
+    bins = sorted({a["bin"] for a in cfg["agents"].values()} | {"git", "hc"})
+    code, out, err = remote_sh(hc_target(name), PROBE.replace("TOOLS", " ".join(bins)))
+    if not out:
+        m["error"] = err or f"exit {code}"
+        return m
+    kv = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    num = lambda k, f=float: f(kv[k]) if kv.get(k, "").replace(".", "", 1).isdigit() else None
+    m.update({
+        "online": True,
+        "os": kv.get("os"), "arch": kv.get("arch"), "home": kv.get("home"),
+        "cpus": num("cpus", int), "load": num("load"),
+        "mem_gb": round(num("mem_kb") / 2**20, 1) if num("mem_kb") else None,
+        "disk_free_gb": round(num("disk_free_kb") / 2**20, 1) if num("disk_free_kb") else None,
+        "power": kv.get("power", "unknown"),
+        "tools": [t for t in kv.get("tools", "").split(",") if t],
+        "probe_ms": int((time.time() - t0) * 1000),
+    })
+    return m
+
+
+def hc_machines():
+    """[(name, state)] for this computer and every machine hc knows."""
+    code, out, err = hc(["machine", "ls", "--json"])
+    rows = json.loads(out).get("machines", []) if code == 0 and out.strip() else []
+    return [(local_name(), None)] + [(r["name"], r.get("state")) for r in rows if not r.get("temporary")]
+
+
+def probe(cfg):
+    ms = hc_machines()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        machines = list(pool.map(lambda m: probe_one(cfg, *m), ms))
+    data = {"updated": int(time.time()), "machines": machines}
+    write_json(FLEET, data)
+    return data
+
+
+def fleet(cfg, max_age=PROBE_MAX_AGE):
+    try:
+        with open(FLEET) as f:
+            data = json.load(f)
+        if time.time() - data.get("updated", 0) <= max_age:
+            return data
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return probe(cfg)
+
+
+# ---------------------------------------------------------------- agents
+
+class Inconclusive(Exception):
+    """hc could not say whether a terminal exists (failure or timeout), as opposed to it being gone."""
+
+
+GONE = re.compile(r"not found|no such|unknown terminal|does not exist|no terminal", re.I)
+
+
+def drover_terminals(strict=False):
+    """Live terminals started by drover, on every machine. With strict, raise
+    Inconclusive when hc ls/get fails for anything but a confirmed-gone terminal."""
+    # `hc ls` leaves labels out, so ask `hc get` for each terminal's (in parallel).
+    code, out, err = hc(["ls", "--json"])
+    if code != 0:
+        if strict:
+            raise Inconclusive(f"hc ls failed ({code}): {(err or out).strip()[:200]}")
+        return []
+    if not out.strip():
+        return []
+    try:
+        rows = json.loads(out).get("terminals", [])
+    except json.JSONDecodeError:
+        if strict:
+            raise Inconclusive("hc ls gave unreadable output")
+        return []
+
+    def full(t):
+        c, o, e = hc(["get", t["address"], "--json"], timeout=15)
+        if c != 0:  # it may have disappeared since ls
+            if strict and not GONE.search(e + o):
+                raise Inconclusive(f"hc get {t['address']} failed ({c}): {(e or o).strip()[:200]}")
+            return {}
+        try:
+            detail = json.loads(o)
+            return {**t, **detail.get("terminal", detail)}
+        except json.JSONDecodeError:
+            if strict:
+                raise Inconclusive(f"hc get {t['address']} gave unreadable output")
+            return t
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        rows = list(pool.map(full, rows))
+    return [t for t in rows if "drover.role" in (t.get("labels") or {})]
+
+
+def machine_of(address):
+    return address.split("/", 1)[0] if "/" in address else local_name()
+
+
+def labels(t):
+    return t.get("labels") or {}
+
+
+# ---------------------------------------------------------------- capacity
+
+CAPACITY = os.path.join(STATE_DIR, "capacity.json")
+DEFAULT_OUT_SECONDS = 3600  # when a message gives no reset time
+
+# What each CLI prints when it is out of capacity: (regex, reason). Add a line
+# to teach drover a new message. "*" patterns apply to every agent.
+CAPACITY_PATTERNS = {
+    "claude": [
+        (r"5-hour limit reached", "5-hour limit"),
+        (r"weekly limit reached", "weekly limit"),
+        (r"(?:claude )?usage limit reached", "usage limit"),
+        (r"you(?:'|’)ve hit your (?:session |weekly |usage )?limit", "usage limit"),
+        (r"limit reached\s*[∙·•\-|]\s*resets", "usage limit"),
+    ],
+    "codex": [
+        (r"you(?:'|’)ve hit your usage limit", "usage limit"),
+        (r"you(?:'|’)ve reached your usage limit", "usage limit"),
+        (r"usage limit (?:reached|exceeded)", "usage limit"),
+        # the interactive prompt codex shows before it stops
+        (r"approaching rate limits", "approaching rate limit"),
+        (r"switch to .{0,60} for lower credit usage", "approaching rate limit"),
+    ],
+    "cursor": [
+        (r"you(?:'|’)ve hit your (?:usage )?limit", "usage limit"),
+        (r"you(?:'|’)ve reached your (?:\w+ )?(?:usage )?limit", "usage limit"),
+        (r"out of (?:usage|requests)", "out of usage"),
+    ],
+    "copilot": [
+        (r"you(?:'|’)ve (?:hit|reached) your .{0,40}(?:rate|usage) limit", "usage limit"),
+        (r"(?:premium )?quota (?:exceeded|exhausted)", "quota exhausted"),
+        (r"rate[- ]limit(?:ed| exceeded| reached)", "rate limit"),
+    ],
+    "*": [
+        (r"usage limit", "usage limit"),
+        (r"rate limit(?:ed| exceeded| reached)", "rate limit"),
+        (r"too many requests", "rate limit"),
+    ],
+}
+CAPACITY_ALIASES = {"cursor-agent": "cursor"}
+
+_UNITS = {"d": 86400, "h": 3600, "m": 60, "s": 1}
+_DURATION = re.compile(r"(\d+)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b", re.I)
+_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+_CLOCK = re.compile(
+    r"(?:(?P<mon>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?,?\s*"
+    r"(?P<year>\d{4})?,?\s*(?:at\s+)?)?"
+    r"(?P<h>\d{1,2})(?::(?P<min>\d{2}))?\s*(?P<ap>[ap]\.?m\.?)?(?![\d:])", re.I)
+
+
+def parse_duration(text):
+    """'2h 14m', '90 minutes', '1d' -> seconds, or None."""
+    found = _DURATION.findall(text)
+    if not found or re.sub(_DURATION, "", text).strip(" ,and"):
+        return None
+    return sum(int(n) * _UNITS[u[0].lower()] for n, u in found)
+
+
+def parse_reset(text, now):
+    """Reset epoch from a message: 'in 2h 14m', 'resets at 3pm', 'try again at Nov 20th, 2026 3:05 AM'."""
+    m = re.search(r"\b(?:in|after)\s+((?:\d+\s*[a-z]+[\s,]*(?:and\s+)?)+)", text, re.I)
+    if m:
+        secs = parse_duration(m.group(1).strip())
+        if secs:
+            return now + secs
+    for m in re.finditer(r"(?:\bat|\bresets?(?:\s+at)?|\buntil|\bafter)\s+(?:on\s+)?(?=[\dA-Za-z])", text, re.I):
+        c = _CLOCK.match(text, m.end())
+        if not c:
+            continue
+        # a bare hour ("at 5") is too ambiguous; need am/pm, a colon time or a date
+        if not (c.group("ap") or c.group("min") or c.group("mon")):
+            continue
+        hour, minute = int(c.group("h")), int(c.group("min") or 0)
+        ap = (c.group("ap") or "").lower()
+        if ap:
+            if not 1 <= hour <= 12:
+                continue
+            hour = hour % 12 + (12 if ap[0] == "p" else 0)
+        if hour > 23 or minute > 59:
+            continue
+        base = datetime.datetime.fromtimestamp(now)
+        try:
+            if c.group("mon"):
+                mon = _MONTHS.index(c.group("mon").lower()) + 1
+                year = int(c.group("year") or base.year)
+                when = datetime.datetime(year, mon, int(c.group("day")), hour, minute)
+                if not c.group("year") and when.timestamp() <= now:
+                    when = when.replace(year=year + 1)
+            else:
+                when = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if re.search(r"tomorrow", text[max(0, m.start() - 20):c.end() + 5], re.I) or when.timestamp() <= now:
+                    when += datetime.timedelta(days=1)
+        except ValueError:
+            continue
+        return when.timestamp()
+    return None
+
+
+def detect_capacity(agent, screen_text, now=None):
+    """Is this agent out of capacity per its screen? -> (until_epoch, reason) or None.
+    until is now + 1h when the message names no reset time."""
+    now = time.time() if now is None else now
+    agent = CAPACITY_ALIASES.get(agent, agent)
+    hit = None
+    for pat, reason in CAPACITY_PATTERNS.get(agent, []) + CAPACITY_PATTERNS["*"]:
+        for m in re.finditer(pat, screen_text or "", re.I):
+            if hit is None or m.start() > hit[0]:  # the latest message wins
+                hit = (m.start(), reason)
+    if not hit:
+        return None
+    # the reset time sits near the message, usually after it
+    until = parse_reset(screen_text[hit[0]:hit[0] + 300], now)
+    return (int(until) if until and until > now else int(now + DEFAULT_OUT_SECONDS)), hit[1]
+
+
+@contextlib.contextmanager
+def capacity_lock():
+    import fcntl
+    d = os.path.join(STATE_DIR, "locks")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "capacity.lock"), "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
+def _read_capacity():
+    try:
+        with open(CAPACITY) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def agents_out(now=None):
+    """{agent: {machine?, until, reason, since}} for agents still out of capacity.
+    (The store's separate 'usage' key holds cached usage readings, not outages.)"""
+    now = time.time() if now is None else now
+    return {a: e for a, e in _read_capacity().items()
+            if a != "usage" and isinstance(e, dict) and e.get("until", 0) > now}
+
+
+def _write_capacity(out, usage):
+    data = dict(out)
+    if usage:
+        data["usage"] = usage
+    write_json(CAPACITY, data)
+
+
+def mark_out(agent, until, reason, machine=None):
+    agent = CAPACITY_ALIASES.get(agent, agent)
+    now = int(time.time())
+    entry = {"until": int(until), "reason": reason or "out of capacity", "since": now}
+    if machine:
+        entry["machine"] = machine
+    with capacity_lock():
+        data = agents_out(now)
+        data[agent] = entry
+        _write_capacity(data, _read_capacity().get("usage"))
+    return entry
+
+
+def clear_out(agent):
+    """Forget that an agent was out. True if it was recorded."""
+    agent = CAPACITY_ALIASES.get(agent, agent)
+    with capacity_lock():
+        data = agents_out()
+        was = data.pop(agent, None) is not None
+        _write_capacity(data, _read_capacity().get("usage"))
+    return was
+
+
+# ---------------------------------------------------------------- usage (proactive quota)
+
+USAGE_TTL = 120  # seconds a reading (or a "nothing available") stays cached
+
+
+def _usage_read(agent, now):
+    """Read an agent CLI's plan usage from local files, without running the agent.
+    -> {used_percent, window, resets_at, source, read_at} for the fullest window that has not
+    reset yet, or None. Self-contained (stdlib only): it is also shipped to remote machines.
+      claude  the statusline input JSON carries rate_limits {five_hour, seven_day: used_percentage,
+              resets_at}; herdboard's statusline hook caches it in ~/.cache/herdboard/claude-limits.json
+      codex   every turn writes a token_count event with rate_limits {primary, secondary:
+              used_percent, window_minutes, resets_at | resets_in_seconds} into ~/.codex/sessions/**.jsonl
+      cursor-agent, copilot: no local usage data exists (no file, no offline command), so None."""
+    import datetime, glob, json, os
+    home = os.path.expanduser("~")
+    wins = []  # (used_percent, window label, resets_at)
+    source, read_at = None, now
+
+    def label(minutes):
+        return f"{round(minutes / 1440)}d" if minutes >= 2880 else f"{round(minutes / 60)}h"
+
+    if agent == "claude":
+        source = os.environ.get("DROVER_CLAUDE_LIMITS") or os.path.join(home, ".cache", "herdboard", "claude-limits.json")
+        try:
+            with open(source) as f:
+                doc = json.load(f)
+            read_at = doc.get("ts") or now
+            for key, lab in (("five_hour", "5h"), ("seven_day", "7d")):
+                w = (doc.get("rate_limits") or {}).get(key) or {}
+                if w.get("used_percentage") is not None and w.get("resets_at"):
+                    wins.append((float(w["used_percentage"]), lab, float(w["resets_at"])))
+        except (OSError, ValueError, AttributeError):
+            return None
+    elif agent == "codex":
+        root = os.path.join(os.environ.get("CODEX_HOME") or os.path.join(home, ".codex"), "sessions")
+        files = sorted(glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True),
+                       key=lambda p: os.path.getmtime(p), reverse=True)[:40]
+        for path in files:
+            try:
+                with open(path, "rb") as f:
+                    f.seek(0, 2)
+                    f.seek(max(0, f.tell() - 262144))
+                    lines = f.read().decode("utf-8", "replace").splitlines()
+            except OSError:
+                continue
+            for line in reversed(lines):
+                if '"rate_limits"' not in line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                    rl = ev["payload"]["rate_limits"]
+                    at = datetime.datetime.fromisoformat(ev["timestamp"].replace("Z", "+00:00")).timestamp()
+                except (ValueError, KeyError, TypeError):
+                    continue
+                for w in (rl.get("primary"), rl.get("secondary")) if isinstance(rl, dict) else ():
+                    if not isinstance(w, dict) or w.get("used_percent") is None:
+                        continue
+                    resets = w.get("resets_at") or (at + w["resets_in_seconds"] if w.get("resets_in_seconds") is not None else None)
+                    if resets:
+                        wins.append((float(w["used_percent"]), label(w.get("window_minutes") or 300), float(resets)))
+                if wins:  # events with rate_limits null (no plan data) are skipped
+                    source, read_at = path, at
+                    break
+            if wins:
+                break
+    else:
+        return None
+    wins = [w for w in wins if w[2] > now]  # a window that already reset says nothing about now
+    if not wins:
+        return None
+    pct, win, resets = max(wins)
+    return {"used_percent": pct, "window": win, "resets_at": int(resets), "source": source, "read_at": int(read_at)}
+
+
+def usage_probe(agent, machine=None, now=None, max_age=USAGE_TTL):
+    """Plan usage of an agent CLI on a machine (None = this computer) or None when unknown.
+    Cached in the capacity store's 'usage' key for max_age seconds; remote machines are read through
+    remote_sh with the same self-contained helper, and any failure just means 'unknown'."""
+    agent = CAPACITY_ALIASES.get(agent, agent)
+    now = time.time() if now is None else now
+    key = f"{agent}@{machine or 'local'}"
+    hit = (_read_capacity().get("usage") or {}).get(key)
+    if isinstance(hit, dict) and now - hit.get("cached_at", 0) < max_age:
+        return hit.get("reading")
+    reading = None
+    try:
+        if machine is None:
+            reading = _usage_read(agent, now)
+        else:
+            src = inspect.getsource(_usage_read) + f"\nprint(json.dumps(_usage_read({agent!r}, {now!r})))\n"
+            code, out, err = remote_sh(machine, "python3 -c " + shlex.quote("import json\n" + src) + " 2>/dev/null", timeout=30)
+            reading = json.loads(out.strip().splitlines()[-1]) if not code and out.strip() else None
+    except Exception:
+        reading = None
+    with capacity_lock():
+        data = _read_capacity()
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        usage[key] = {"cached_at": int(now), "reading": reading}
+        _write_capacity(agents_out(now), usage)
+    return reading
+
+
+def usage_list(cfg, now=None):
+    """Usage rows for 'drover agent list' and the dashboard: this computer's agents (read now, cached
+    briefly) plus whatever remote readings routing has cached."""
+    now = time.time() if now is None else now
+    rows, seen = [], set()
+    for name in cfg["agents"]:
+        name = CAPACITY_ALIASES.get(name, name)
+        if name in seen:
+            continue
+        seen.add(name)
+        u = usage_probe(name, None, now)
+        if u:
+            rows.append({"agent": name, "machine": None, **u})
+    for key, hit in sorted((_read_capacity().get("usage") or {}).items()):
+        agent, _, machine = key.partition("@")
+        if machine != "local" and isinstance(hit, dict) and hit.get("reading") and now - hit.get("cached_at", 0) < 3600:
+            rows.append({"agent": agent, "machine": machine, **hit["reading"]})
+    for r in rows:
+        r["name"] = cfg["agents"].get(r["agent"], {}).get("name") or r["agent"]
+    return rows
+
+
+def fmt_usage(u, now=None):
+    return f"{u['used_percent']:.0f}% of {u['window']} window, resets {fmt_until(u['resets_at'], now)}"
+
+
+def fmt_until(until, now=None):
+    now = time.time() if now is None else now
+    t = datetime.datetime.fromtimestamp(until)
+    same_day = t.date() == datetime.datetime.fromtimestamp(now).date()
+    return t.strftime("%H:%M" if same_day else "%Y-%m-%d %H:%M")
+
+
+def parse_until(text, now=None):
+    """--until value: a duration ('2h30m') or an ISO date/time (local time unless it has an offset)."""
+    now = time.time() if now is None else now
+    secs = parse_duration(text.strip())
+    if secs:
+        return int(now + secs)
+    try:
+        return int(datetime.datetime.fromisoformat(text.strip()).timestamp())
+    except ValueError:
+        die(f"--until {text!r}: use a duration like 2h30m or an ISO time like 2026-11-14T09:00")
+
+
+def cmd_agent(a, cfg):
+    if a.action == "out":
+        if not a.agent:
+            die("agent out: which agent?")
+        until = parse_until(a.until) if a.until else int(time.time() + DEFAULT_OUT_SECONDS)
+        entry = mark_out(a.agent, until, a.reason or "set by hand", machine=a.machine)
+        data = {"agent": a.agent, **entry}
+        emit(data, a.json, lambda d: f"{d['agent']} out until {fmt_until(d['until'])} ({d['reason']})")
+    elif a.action == "clear":
+        if not a.agent:
+            die("agent clear: which agent?")
+        data = {"agent": a.agent, "cleared": clear_out(a.agent)}
+        emit(data, a.json, lambda d: f"{d['agent']} " + ("is available again" if d["cleared"] else "was not marked out"))
+    else:
+        data = {"out": agents_out(), "usage": usage_list(cfg)}
+        def text(d):
+            lines = [f"{n}: out until {fmt_until(e['until'])} ({e['reason']})"
+                     + (f" on {e['machine']}" if e.get("machine") else "") for n, e in d["out"].items()]
+            lines += [f"{u['name']}: used {fmt_usage(u)}" + (f" on {u['machine']}" if u["machine"] else "")
+                      for u in d["usage"]]
+            return "\n".join(lines) or "no agent is out of capacity; no usage data available"
+        emit(data, a.json, text)
+
+
+# ---------------------------------------------------------------- routing
+
+def build_argv(agent, model, task, repo="", *, auto=False):
+    argv, skip = [], False
+    # Configured auto_args always apply (as before); the built-in defaults only for an auto mission.
+    # An empty configured list switches the flags off.
+    auto_args = agent["auto_args"] if "auto_args" in agent else (agent.get("default_auto_args", []) if auto else [])
+    tpl = list(agent["argv"])
+    if auto_args and "{task}" in tpl:
+        # Right after the binary, so a prompt flag such as Copilot's -i stays next to its value.
+        tpl[1:1] = auto_args
+    tpl = [p.replace("{repo}", repo) for p in tpl]
+    for i, part in enumerate(tpl):
+        if skip:
+            skip = False
+            continue
+        nxt = tpl[i + 1] if i + 1 < len(tpl) else None
+        if nxt == "{model}" and not model:
+            skip = True  # drop the flag and its value
+            continue
+        argv.append(part.replace("{model}", model or "").replace("{task}", task))
+    return [a for a in argv if a != ""]
+
+
+def route(cfg, role, families_to_avoid=(), repo=None, machine=None, prefer_agent=None, prefer_model=None,
+          prefer_force=False, skip_agent=None):
+    """Pick (agent, model, machine) for a role. Returns a decision with the
+    reasons every rejected option was skipped, so the panel can show why.
+    `prefer_agent` is tried before the role's chain (falling back to it when that
+    agent is out of capacity or not installed); a reviewer still can't share the
+    author's family. `prefer_force` takes the preferred agent without the capacity and install checks;
+    `skip_agent` leaves one agent out of the chain (moving a task off it)."""
+    r = cfg["roles"].get(role)
+    if not r:
+        die(f"unknown role {role!r} (have: {', '.join(cfg['roles'])})")
+    chain = [c for c in r["chain"] if c["agent"] != skip_agent]
+    if prefer_agent:
+        pa = cfg["agents"].get(prefer_agent)
+        if not pa:
+            die(f"unknown agent {prefer_agent!r} (have: {', '.join(cfg['agents'])})")
+        if r.get("other_family") and pa["family"] in families_to_avoid:
+            die(f"{prefer_agent} is the same model family ({pa['family']}) as the author; a reviewer must be from another family")
+        chain = [{"agent": prefer_agent, "model": prefer_model}] + [c for c in chain if c["agent"] != prefer_agent]
+    data = fleet(cfg)
+    running = {}
+    for t in drover_terminals():
+        if labels(t).get("drover.role") == "watcher":  # not an agent: never counts against max_agents
+            continue
+        running[machine_of(t["address"])] = running.get(machine_of(t["address"]), 0) + 1
+    pl = cfg["placement"]
+    prefer = r.get("prefer") or []
+    rejected = []
+    out = agents_out()
+
+    def machine_ok(m):
+        mc = machine_cfg(cfg, m["name"])
+        if machine and m["name"] != machine:
+            return "not the requested machine"
+        if not m.get("online"):
+            return m.get("error") or "offline"
+        if not mc["enabled"]:
+            return "disabled in settings"
+        if r.get("durable") and not mc["durable"]:
+            return "not a durable host"
+        if pl.get("avoid_battery") and m.get("power") == "battery":
+            return "on battery"
+        if m.get("disk_free_gb") is not None and m["disk_free_gb"] < pl.get("min_disk_gb", 0):
+            return f"only {m['disk_free_gb']} GB free"
+        if running.get(m["name"], 0) >= mc["max_agents"]:
+            return f"full ({running.get(m['name'], 0)}/{mc['max_agents']} agents)"
+        return None
+
+    def rank(m):
+        # Preferred machines first, in their order; then the least loaded per CPU.
+        pref = prefer.index(m["name"]) if m["name"] in prefer else len(prefer)
+        busy = (m.get("load") or 0) / max(m.get("cpus") or 1, 1) + running.get(m["name"], 0)
+        return (pref, busy)
+
+    ok_machines = []
+    for m in data["machines"]:
+        why = machine_ok(m)
+        if why:
+            rejected.append({"machine": m["name"], "why": why})
+        else:
+            ok_machines.append(m)
+    # Only machines that have the project checked out.
+    if repo:
+        def has_repo(m):
+            path = remote_path(cfg, repo, m["name"])
+            if m["name"] == local_name():
+                return os.path.isdir(os.path.join(path, ".git")) or os.path.isfile(os.path.join(path, ".git"))
+            code, out, err = remote_sh(hc_target(m["name"]), f"[ -e {shlex.quote(path)}/.git ] && echo yes=1", timeout=20)
+            return "yes=1" in out
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            have = list(pool.map(has_repo, ok_machines))
+        for m, ok in zip(list(ok_machines), have):
+            if not ok:
+                ok_machines.remove(m)
+                rejected.append({"machine": m["name"], "why": "project not checked out there"})
+    ok_machines.sort(key=rank)
+
+    # Proactive quota. usage_probe reads how full an agent's plan window is before it runs out.
+    # Rule 1: at or above avoid_above_percent the agent counts as out on that machine until its window
+    # resets (mark_out, so every later route sees it too). Rule 2 (prefer_headroom): chain order still
+    # wins, except that a choice at or above headroom_percent is only a fallback: the first later choice
+    # that is KNOWN to be below headroom_percent replaces it. Unknown usage never beats a known-high one.
+    q = cfg.get("quota") or {}
+    avoid_at = q.get("avoid_above_percent") or 0
+    headroom_at = (q.get("headroom_percent") or 0) if q.get("prefer_headroom") else 0
+    tight = None  # first viable choice above the headroom line
+
+    def finish(dec):
+        if prefer_agent and dec["agent"] != prefer_agent:
+            why = "; ".join(x["why"] for x in rejected if x.get("agent") == prefer_agent) or "unavailable"
+            dec["fallback"] = f"{prefer_agent} unavailable ({why}); used {dec['agent']} from the {role} chain"
+        return dec
+
+    for choice in chain:
+        agent = cfg["agents"].get(choice["agent"])
+        if not agent:
+            rejected.append({"agent": choice["agent"], "why": "no such agent in settings"})
+            continue
+        if r.get("other_family") and agent["family"] in families_to_avoid:
+            rejected.append({"agent": choice["agent"], "why": f"same family as the author ({agent['family']})"})
+            continue
+        forced = bool(prefer_force and choice["agent"] == prefer_agent)
+        o = None if forced else out.get(CAPACITY_ALIASES.get(choice["agent"], choice["agent"]))
+        if o and not o.get("machine"):
+            rejected.append({"agent": choice["agent"], "why": f"out of capacity until {fmt_until(o['until'])} ({o['reason']})"})
+            continue
+        for m in ok_machines:
+            if o and o.get("machine") == m["name"]:
+                rejected.append({"agent": choice["agent"], "machine": m["name"],
+                                 "why": f"out of capacity until {fmt_until(o['until'])} ({o['reason']})"})
+                continue
+            if not forced and agent["bin"] not in m.get("tools", []):
+                rejected.append({"agent": choice["agent"], "machine": m["name"], "why": f"{agent['bin']} not installed"})
+                continue
+            u = usage_probe(choice["agent"], hc_target(m["name"])) if (avoid_at or headroom_at) and not forced else None
+            if u and avoid_at and u["used_percent"] >= avoid_at and u["resets_at"] > time.time():
+                why = f"used {u['used_percent']:.0f}% of {u['window']} window"
+                mark_out(choice["agent"], u["resets_at"], why, machine=m["name"])
+                rejected.append({"agent": choice["agent"], "machine": m["name"],
+                                 "why": f"out of capacity until {fmt_until(u['resets_at'])} ({why})"})
+                continue
+            decision = {"role": role, "agent": choice["agent"], "model": choice.get("model"),
+                        "family": agent["family"], "machine": m["name"], "rejected": rejected}
+            if headroom_at and u and u["used_percent"] >= headroom_at:
+                if prefer_agent and choice["agent"] == prefer_agent:
+                    # an explicit choice only yields to hard limits: note the headroom, keep it
+                    decision["note"] = (f"{prefer_agent} has used {u['used_percent']:.0f}% of its {u['window']} "
+                                        f"window (above {headroom_at}% headroom); kept because it was asked for")
+                    return finish(decision)
+                tight = tight or (decision, u)
+                continue
+            if tight and not (u and headroom_at):  # unknown usage is no headroom
+                continue
+            if tight:
+                first, fu = tight
+                rejected.append({"agent": first["agent"], "machine": first["machine"],
+                                 "why": f"used {fu['used_percent']:.0f}% of {fu['window']} window "
+                                        f"(above {headroom_at}% headroom); {choice['agent']} has headroom"})
+            return finish(decision)
+    if tight:
+        return finish(tight[0])
+    return {"role": role, "agent": None, "machine": None, "rejected": rejected}
+
+
+def remote_path(cfg, repo, machine):
+    """The same project on another machine: a path under ~ maps to that
+    machine's home; anything else is used as given."""
+    repo = os.path.abspath(os.path.expanduser(repo))
+    if machine == local_name():
+        return repo
+    home = next((m.get("home") for m in fleet(cfg)["machines"] if m["name"] == machine), None)
+    if home and (repo == HOME or repo.startswith(HOME + os.sep)):
+        return home + repo[len(HOME):]
+    return repo
+
+
+def slug(text, n=24):
+    s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return s[:n].strip("-") or "task"
+
+
+# ---------------------------------------------------------------- cleanup
+
+CLEANUP = r"""
+cd "$REPO" 2>/dev/null || { echo "missing=1"; exit 0; }
+git rev-parse --git-dir >/dev/null 2>&1 || { echo "missing=1"; exit 0; }
+git fetch --prune --quiet "$REMOTE" 2>/dev/null
+base=$(git symbolic-ref --quiet --short "refs/remotes/$REMOTE/HEAD" 2>/dev/null)
+[ -n "$base" ] || base=$(git rev-parse --abbrev-ref HEAD)
+echo "base=$base"
+git worktree list --porcelain | awk '/^worktree /{w=$2} /^branch refs\/heads\/drover\//{sub("refs/heads/","",$2); print "worktree=" $2 "=" w}'
+for b in $(git for-each-ref --format='%(refname:short)' "refs/heads/$PREFIX*"); do
+  if git merge-base --is-ancestor "$b" "$base" 2>/dev/null; then m=1
+  elif [ -z "$(git cherry "$base" "$b" 2>/dev/null | grep '^+')" ]; then m=1
+  else m=0; fi
+  echo "local=$b=$m=$(git log -1 --format=%cr "$b")"
+done
+for b in $(git for-each-ref --format='%(refname:short)' "refs/remotes/$REMOTE/$PREFIX*"); do
+  short=${b#$REMOTE/}
+  if git merge-base --is-ancestor "$b" "$base" 2>/dev/null; then m=1
+  elif [ -z "$(git cherry "$base" "$b" 2>/dev/null | grep '^+')" ]; then m=1
+  else m=0; fi
+  echo "remote=$short=$m"
+done
+"""
+
+
+def cleanup_plan(cfg, repo, machine):
+    remote = cfg["handoff"].get("remote", "origin")
+    path = remote_path(cfg, repo, machine)
+    env = f"REPO={shlex.quote(path)} REMOTE={shlex.quote(remote)} PREFIX={shlex.quote(BRANCH_PREFIX)}\n"
+    code, out, err = remote_sh(hc_target(machine), env + CLEANUP, timeout=90)
+    plan = {"machine": machine, "repo": path, "worktrees": {}, "local": [], "remote": [], "keep": []}
+    for line in out.splitlines():
+        k, _, v = line.partition("=")
+        if k == "missing":
+            plan["missing"] = True
+        elif k == "base":
+            plan["base"] = v
+        elif k == "worktree":
+            b, w = v.split("=", 1)
+            plan["worktrees"][b] = w
+        elif k == "local":
+            b, m, age = v.split("=", 2)
+            (plan["local"] if m == "1" else plan["keep"]).append({"branch": b, "age": age})
+        elif k == "remote":
+            b, m = v.split("=", 1)
+            if m == "1":
+                plan["remote"].append({"branch": b})
+            elif not any(x["branch"] == b for x in plan["keep"]):
+                plan["keep"].append({"branch": b, "age": "remote only"})
+    busy = {labels(t).get("drover.branch") for t in drover_terminals()}
+    for kind in ("local", "remote"):
+        for x in list(plan[kind]):
+            if x["branch"] in busy:  # an agent still works there
+                plan[kind].remove(x)
+                plan["keep"].append({"branch": x["branch"], "age": "agent still running"})
+    return plan
+
+
+def cleanup_apply(cfg, plan):
+    remote = cfg["handoff"].get("remote", "origin")
+    cmds = [f"cd {shlex.quote(plan['repo'])} || exit 1"]
+    for x in plan["local"]:
+        w = plan["worktrees"].get(x["branch"])
+        if w:
+            cmds.append(f"git worktree remove --force {shlex.quote(w)}")
+        # -D is safe here: the plan only lists branches whose changes are in base.
+        cmds.append(f"git branch -D {shlex.quote(x['branch'])}")
+    if cfg["cleanup"].get("delete_remote"):
+        for x in plan["remote"]:
+            cmds.append(f"git push --quiet {shlex.quote(remote)} --delete {shlex.quote(x['branch'])}")
+    cmds.append("git worktree prune")
+    code, out, err = remote_sh(hc_target(plan["machine"]), "\n".join(cmds) + "\necho done=1", timeout=120)
+    return "done=1" in out, out + err
+
+
+# ---------------------------------------------------------------- commands
+
+def cmd_config(a, cfg):
+    if a.set_json:
+        try:
+            new = json.loads(a.set_json)
+        except json.JSONDecodeError as e:
+            die(f"not JSON: {e}")
+        if not isinstance(new, dict) or not isinstance(new.get("roles", {}), dict):
+            die("settings must be a JSON object")
+        write_json(CONFIG, new)
+        cfg = load_config()
+    elif a.init and not os.path.exists(CONFIG):
+        write_json(CONFIG, {"version": 1, "machines": {}})
+        cfg = load_config()
+    emit({"path": CONFIG, "config": cfg}, a.json, lambda d: json.dumps(d["config"], indent=2))
+
+
+def fmt_machine(m):
+    if not m.get("online"):
+        return f"  {m['name']:<14} offline  {m.get('error', '')}"
+    return (f"  {m['name']:<14} {m.get('os', ''):<7} {m.get('cpus') or '?':>3} cpu  load {m.get('load')}  "
+            f"{m.get('disk_free_gb')} GB free  {m.get('power')}  {' '.join(m.get('tools', []))}")
+
+
+def cmd_probe(a, cfg):
+    data = probe(cfg)
+    emit(data, a.json, lambda d: "\n".join(fmt_machine(m) for m in d["machines"]))
+
+
+def cmd_status(a, cfg):
+    data = fleet(cfg, max_age=a.max_age)
+    for m in data["machines"]:
+        m["settings"] = machine_cfg(cfg, m["name"])
+    agents = []
+    for t in drover_terminals():
+        lb = labels(t)
+        agents.append({"address": t["address"], "machine": machine_of(t["address"]),
+                       "role": lb.get("drover.role"), "agent": lb.get("drover.agent"),
+                       "model": lb.get("drover.model") or None, "task": lb.get("drover.task"),
+                       "branch": lb.get("drover.branch"), "status": t.get("status"), "state": t.get("state")})
+    out = {"version": VERSION, "local": local_name(), "updated": data["updated"],
+           "machines": data["machines"], "agents": agents, "roles": list(cfg["roles"]), "config": cfg}
+    emit(out, a.json, lambda d: "\n".join(fmt_machine(m) for m in d["machines"]) +
+         "".join(f"\n  {x['address']:<16} {x['role']:<12} {x['agent']} {x['task'] or ''}" for x in d["agents"]))
+
+
+def fmt_route(d):
+    lines = [f"{d['role']}: " + (f"{d['agent']}{' (' + d['model'] + ')' if d.get('model') else ''} on {d['machine']}"
+                                 if d["agent"] else "nowhere to run it")]
+    for x in d["rejected"]:
+        lines.append(f"  skipped {x.get('agent') or ''}{' on ' if x.get('agent') and x.get('machine') else ''}"
+                     f"{x.get('machine') or ''}: {x['why']}")
+    return "\n".join(lines)
+
+
+def cmd_route(a, cfg):
+    d = route(cfg, a.role, families_to_avoid=a.avoid_family or (), machine=a.machine)
+    emit(d, a.json, fmt_route)
+    sys.exit(0 if d["agent"] else 3)
+
+
+PRETRUST_CONFIGS = {"codex": (".codex/config.toml", True),
+                   "claude": (".claude.json", False),
+                   # cursor-agent records trust as ~/.cursor/projects/<slug>/.workspace-trusted
+                   # ({"trustedAt", "workspacePath"}), written when "Trust this workspace"
+                   # is accepted; with it present no prompt appears (verified). It also has
+                   # a `--trust` flag, but an unknown flag would break older installs on
+                   # remote hosts, so drover writes the marker instead (see cursor()).
+                   "cursor": (".cursor/projects", True)}
+
+
+def pretrust_config(agent, paths, relative, create):
+    """Self-contained so the same stdlib-only code can run on the target host."""
+    import fcntl
+    import hashlib
+    import json
+    import os
+    import re
+    import stat
+    import subprocess
+    import tempfile
+    import time
+
+    def codex(text, roots):
+        # Mask strings/comments before finding table boundaries: a prompt in a
+        # multiline TOML string can itself contain apparent project tables.
+        quoted = r'"(?:\\.|[^"\\\r\n])*"|\'[^\'\r\n]*\''
+        token = quoted + r'|[A-Za-z0-9_-]+'
+        strings = r'#[^\r\n]*|"""(?:\\[\s\S]|(?!""")[\s\S])*"""'
+        strings += r"|'''[\s\S]*?'''|" + quoted
+
+        def key(value):
+            if value.startswith("'"):
+                return value[1:-1]
+            if value.startswith('"'):
+                # TOML basic keys share JSON escapes, plus \UXXXXXXXX.
+                return json.loads(re.sub(r'\\(U[0-9A-Fa-f]{8}|.)',
+                    lambda m: json.dumps(chr(int(m[1][1:], 16)))[1:-1]
+                    if m[1].startswith("U") else m[0], value))
+            return value
+
+        for root in roots:
+            masked = re.sub(strings, lambda m: re.sub(r'[^\r\n]', ' ', m[0]), text)
+            headers = list(re.finditer(r'(?m)^[ \t]*\[', masked))
+            found = False
+            for i, header in enumerate(headers):
+                end = text.find("\n", header.start())
+                end = len(text) if end < 0 else end + 1
+                match = re.fullmatch(r'\s*\[\s*((?:' + token + r')(?:\s*\.\s*(?:' + token +
+                                    r'))*)\s*\]\s*(?:#[^\r\n]*)?\s*', text[header.start():end])
+                if not match or [key(m[0]) for m in re.finditer(token, match[1])] != ["projects", root]:
+                    continue
+                found = True
+                stop = headers[i + 1].start() if i + 1 < len(headers) else len(text)
+                body = text[end:stop]
+                # Only inspect actual assignment lines, not multiline strings.
+                assignments = re.finditer(r'(?m)^[ \t]*(?:trust_level|"trust_level"|\'trust_level\')'
+                                          r'[ \t]*=[ \t]*(?P<value>"[^"\r\n]*"|\'[^\'\r\n]*\')', body)
+                for assignment in assignments:
+                    equals = end + body.index("=", assignment.start(), assignment.end())
+                    if masked[equals] != "=":
+                        continue
+                    a, b = assignment.span("value")
+                    if key(body[a:b]) != "trusted":
+                        text = text[:end + a] + '"trusted"' + text[end + b:]
+                    break
+                else:
+                    text = text[:end] + ("" if text[:end].endswith("\n") else "\n") + \
+                           'trust_level = "trusted"\n' + text[end:]
+                break
+            if not found:
+                if text:
+                    text += "\n" if text.endswith("\n") else "\n\n"
+                text += '[projects.' + json.dumps(root, ensure_ascii=False) + ']\ntrust_level = "trusted"\n'
+        # Validate when available without requiring Python newer than 3.9.
+        try:
+            import tomllib
+        except ImportError:
+            pass
+        else:
+            parsed = tomllib.loads(text)
+            if any(parsed["projects"][root]["trust_level"] != "trusted" for root in roots):
+                raise ValueError("could not locate Codex project trust tables")
+        return text
+
+    def claude(text, roots):
+        data = json.loads(text)
+        changed = False
+        for root in roots:
+            project = data.setdefault("projects", {}).setdefault(root, {})
+            if project.get("hasTrustDialogAccepted") is not True:
+                project["hasTrustDialogAccepted"] = True
+                changed = True
+        return json.dumps(data, indent=2) + "\n" if changed else text
+
+    def cursor(text, roots):
+        # One file per workspace, so `roots` holds exactly one folder here.
+        # Content is {"trustedAt": ISO-8601 UTC, "workspacePath": folder}.
+        try:
+            data = json.loads(text) if text.strip() else {}
+        except ValueError:
+            data = {}
+        if isinstance(data, dict) and data.get("trustedAt") and data.get("workspacePath") == roots[0]:
+            return text
+        data = dict(data) if isinstance(data, dict) else {}
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+        data.setdefault("trustedAt", stamp + ".000Z")
+        data["workspacePath"] = roots[0]
+        return json.dumps(data, indent=2) + "\n"
+
+    edit = {"codex": codex, "claude": claude, "cursor": cursor}[agent]
+    roots = []
+    for folder in paths:
+        folder = os.path.abspath(os.path.expanduser(folder))
+        result = subprocess.run(["git", "-C", folder, "rev-parse", "--show-toplevel"],
+                                capture_output=True, text=True, timeout=5)
+        root = result.stdout.strip() if result.returncode == 0 else folder
+        if root not in roots:
+            roots.append(root)
+    if agent == "cursor":
+        # cursor-agent keeps ~/.cursor/projects/<slug>/.workspace-trusted per
+        # workspace; slug = path with every run of non-alphanumerics -> "-".
+        base = os.path.realpath(os.path.expanduser("~/" + relative))
+        targets = [(os.path.join(base, re.sub(r"[^A-Za-z0-9]+", "-", root).strip("-"),
+                                 ".workspace-trusted"), [root]) for root in roots]
+        lock_key = base
+    else:
+        path = os.path.realpath(os.path.expanduser("~/" + relative))
+        if not create and not os.path.exists(path):
+            return
+        targets = [(path, roots)]
+        lock_key = path
+    # Keep a stable lock inode across config replacements and waiting writers.
+    # Unlinking it after use would let concurrent writers lock different inodes.
+    lock_dir = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
+                            "drover", "locks")
+    os.makedirs(lock_dir, exist_ok=True)
+    lock_path = os.path.join(lock_dir, "pretrust-" + hashlib.sha256(lock_key.encode()).hexdigest() + ".lock")
+    with open(lock_path, "a") as lock:
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("timed out locking " + lock_key)
+                time.sleep(0.05)
+        for path, file_roots in targets:
+            try:
+                with open(path, encoding="utf-8", newline="") as source:
+                    before = source.read()
+                mode = stat.S_IMODE(os.stat(path).st_mode)
+            except FileNotFoundError:
+                if not create:
+                    continue
+                before, mode = "", (0o644 if agent == "cursor" else 0o600)
+            after = edit(before, file_roots)
+            if after == before:
+                continue
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            fd, temporary = tempfile.mkstemp(prefix=".drover-pretrust-", dir=os.path.dirname(path))
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8", newline="") as output:
+                    os.fchmod(output.fileno(), mode)
+                    output.write(after)
+                os.replace(temporary, path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+
+
+def pretrust_agent(cfg, agent, machine, repo, cwd):
+    """Trust on the execution host; configuration errors must never stop a launch."""
+    try:
+        if agent not in PRETRUST_CONFIGS or not cfg["agents"][agent].get("pretrust", True):
+            return
+        arguments = (agent, [repo, cwd], *PRETRUST_CONFIGS[agent])
+        if hc_target(machine) is None:
+            pretrust_config(*arguments)
+        else:
+            source = inspect.getsource(pretrust_config)
+            source += "\npretrust_config(*" + repr(arguments) + ")\n"
+            code, out, err = remote_sh(hc_target(machine),
+                                      "python3 -c " + shlex.quote(source) + " 2>&1", timeout=30)
+            if code:
+                raise RuntimeError((out + err).strip() or f"exit {code}")
+    except Exception as e:
+        print(f"drover: warning: could not pre-trust {agent} folders on {machine}: {e}", file=sys.stderr)
+
+
+def start_agent(cfg, role, repo, message, title, *, avoid=(), machine=None, labels_extra=None,
+                cwd=None, branch=None, worktree=True, dry_run=False, name=None, auto=False,
+                prefer_agent=None, prefer_model=None, prefer_force=False, skip_agent=None):
+    """Route a role and start it in a kept hc terminal. Unless `cwd` is given,
+    every role but the coordinator gets its own drover/<task> branch in its own
+    worktree on that machine, so parallel agents never share a checkout
+    (Herdr's worktree folder, so the app nests it under the repo).
+    Returns the routing decision plus what was started; dies when nowhere fits."""
+    d = route(cfg, role, families_to_avoid=avoid, machine=machine, repo=None if cwd else repo,
+              prefer_agent=prefer_agent, prefer_model=prefer_model, prefer_force=prefer_force, skip_agent=skip_agent)
+    if not d["agent"]:
+        return d
+    agent = cfg["agents"][d["agent"]]
+    rpath = remote_path(cfg, repo, d["machine"])
+    stamp = time.strftime("%m%d%H%M")
+    name = name or f"{role[:4]}-{slug(title, 14)}-{stamp[-4:]}"
+    if cwd is None and worktree and role != "coordinator":
+        branch = branch or f"{BRANCH_PREFIX}{slug(title)}-{stamp}"
+        wt_home = next((m.get("home") for m in fleet(cfg)["machines"] if m["name"] == d["machine"]), None) or HOME
+        cwd = f"{wt_home}/.herdr/worktrees/{os.path.basename(rpath.rstrip('/'))}/{branch.replace('/', '-')}"
+        new_worktree = True
+    else:
+        new_worktree = False
+        cwd = cwd or rpath
+    argv = build_argv(agent, d.get("model"), message, rpath, auto=auto)
+    lb = {"drover.role": role, "drover.agent": d["agent"], "drover.model": d.get("model") or "",
+          "drover.task": title[:120], "drover.branch": branch or "", "drover.family": agent["family"],
+          **(labels_extra or {})}
+    args = ["run", "--bg", "--json", *on_args(hc_target(d["machine"])), "--cwd", cwd, "--name", name, "--keep"]
+    for k, v in lb.items():
+        args += ["--label", f"{k}={v}"]
+    if not os.environ.get("HC_TERMINAL_ID"):
+        args.append("--no-parent")
+    args += ["--", *argv]
+    d.update({"argv": argv, "cwd": cwd, "branch": branch or "", "repo": rpath, "name": name})
+    if dry_run:
+        d["hc"] = ["hc", *args]
+        return d
+    if new_worktree:
+        script = (f"cd {shlex.quote(rpath)} || exit 1\n"
+                  f"git rev-parse --git-dir >/dev/null 2>&1 || {{ echo 'error=not a git repo'; exit 0; }}\n"
+                  f"mkdir -p {shlex.quote(os.path.dirname(cwd))}\n"
+                  f"git worktree add --quiet -b {shlex.quote(branch)} {shlex.quote(cwd)} HEAD 2>&1 && echo ok=1\n")
+        code, out, err = remote_sh(hc_target(d["machine"]), script, timeout=60)
+        if "ok=1" not in out:
+            die(f"could not make worktree {cwd} on {d['machine']}: {(out + err).strip() or 'repo missing there?'}")
+    pretrust_agent(cfg, d["agent"], d["machine"], rpath, cwd)
+    code, out, err = hc(args, timeout=90)
+    if code != 0:
+        die(f"hc run failed: {err.strip() or out.strip()}")
+    started = json.loads(out) if out.strip().startswith("{") else {}
+    d["started"] = started
+    d["address"] = started.get("address") or started.get("terminal", {}).get("address") or ""
+    if d["address"] and "/" not in d["address"] and d["machine"] != local_name():
+        d["address"] = f"{d['machine']}/{d['address']}"
+    return d
+
+
+def cmd_run(a, cfg):
+    d = start_agent(cfg, a.role, a.repo, a.task, a.task, avoid=a.avoid_family or (), machine=a.machine,
+                    dry_run=a.dry_run, name=a.name)
+    if not d["agent"]:
+        emit(d, a.json, fmt_route)
+        sys.exit(3)
+    if a.dry_run:
+        emit(d, a.json, lambda x: fmt_route(x) + "\n  would run: " + shlex.join(x["hc"]))
+        return
+    emit(d, a.json, lambda x: fmt_route(x) + f"\n  started {x['address']}")
+
+
+def cmd_cleanup(a, cfg):
+    machines = [m["name"] for m in fleet(cfg)["machines"] if m.get("online")]
+    if a.machine:
+        machines = [a.machine]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        plans = [p for p in pool.map(lambda m: cleanup_plan(cfg, a.repo, m), machines) if not p.get("missing")]
+    # The remote is shared: delete each remote branch once.
+    seen = set()
+    for p in plans:
+        p["remote"] = [x for x in p["remote"] if x["branch"] not in seen and not seen.add(x["branch"])]
+    if a.yes:
+        for p in plans:
+            if p["local"] or p["remote"]:
+                p["applied"], p["log"] = cleanup_apply(cfg, p)
+
+    def text(ps):
+        lines = []
+        for p in ps:
+            lines.append(f"{p['machine']}: {p['repo']} (base {p.get('base', '?')})")
+            for x in p["local"]:
+                wt = p["worktrees"].get(x["branch"])
+                lines.append(f"  {'removed' if p.get('applied') else 'remove'} {x['branch']}" + (f" + worktree {wt}" if wt else ""))
+            for x in p["remote"]:
+                lines.append(f"  {'removed' if p.get('applied') else 'remove'} remote {x['branch']}")
+            for x in p["keep"]:
+                lines.append(f"  keep   {x['branch']} (not merged; {x['age']})")
+            if not (p["local"] or p["remote"] or p["keep"]):
+                lines.append("  nothing to clean")
+        if not a.yes and any(p["local"] or p["remote"] for p in ps):
+            lines.append("dry run: add --yes to remove the branches above")
+        return "\n".join(lines) or "the repo is on no reachable machine"
+    emit({"plans": plans, "applied": a.yes}, a.json, text)
+
+
+# ---------------------------------------------------------------- projects
+
+def coordinator_tab(repo):
+    """Per-project herdr.tab id: Herdr reuses a tab by id across spaces, so a shared id pulls coordinators into the wrong space."""
+    repo = os.path.realpath(repo)
+    return f"drover-coordinator-{slug(os.path.basename(repo), 16)}-{hashlib.sha1(repo.encode()).hexdigest()[:8]}"
+
+
+def tilde(path):
+    path = os.path.abspath(os.path.expanduser(path))
+    return "~" + path[len(HOME):] if path == HOME or path.startswith(HOME + os.sep) else path
+
+
+def git_facts(path):
+    """Branch, origin URL and last commit time of a repo here, or {} if it isn't one."""
+    def g(*args):
+        p = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True)
+        return p.stdout.strip() if p.returncode == 0 else ""
+    if not g("rev-parse", "--git-dir"):
+        return {}
+    last = g("log", "-1", "--format=%ct")
+    return {"branch": g("branch", "--show-current") or None, "remote": g("remote", "get-url", "origin") or None,
+            "last_commit": int(last) if last.isdigit() else None}
+
+
+def scan_repos(cfg):
+    """Git repos up to two levels under the scan roots (default ~/Work)."""
+    found = []
+    for root in cfg.get("project_roots") or ["~/Work"]:
+        root = os.path.expanduser(root)
+        for depth1 in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+            p1 = os.path.join(root, depth1)
+            if depth1.startswith(".") or not os.path.isdir(p1):
+                continue
+            if os.path.exists(os.path.join(p1, ".git")):
+                found.append(p1)
+                continue
+            for depth2 in sorted(os.listdir(p1)):
+                p2 = os.path.join(p1, depth2)
+                if not depth2.startswith(".") and os.path.exists(os.path.join(p2, ".git")):
+                    found.append(p2)
+    return found
+
+
+def save_user_config(update):
+    """Merge `update` into the user's own config file (not the defaults)."""
+    try:
+        with open(CONFIG) as f:
+            user = json.load(f)
+    except FileNotFoundError:
+        user = {"version": 1}
+    write_json(CONFIG, merged(user, update))
+
+
+def project_list(cfg):
+    known = cfg.get("projects") or {}
+    by_path = {os.path.expanduser(v["path"]): k for k, v in known.items()}
+    rows = []
+    for name, v in known.items():
+        path = os.path.expanduser(v["path"])
+        rows.append({"name": name, "path": tilde(path), "known": True, "exists": os.path.isdir(path),
+                     "opened": v.get("opened"), **git_facts(path)})
+    for path in scan_repos(cfg):
+        if path not in by_path:
+            rows.append({"name": os.path.basename(path), "path": tilde(path), "known": False, "exists": True,
+                         **git_facts(path)})
+    rows.sort(key=lambda r: (not r["known"], -(r.get("opened") or 0), -(r.get("last_commit") or 0)))
+    return rows
+
+
+def unique_name(cfg, name):
+    known = cfg.get("projects") or {}
+    base, n = slug(name, 40), 2
+    out = base
+    while out in known:
+        out, n = f"{base}-{n}", n + 1
+    return out
+
+
+def cmd_project(a, cfg):
+    if a.action == "list":
+        rows = project_list(cfg)
+        emit({"projects": rows}, a.json, lambda d: "\n".join(
+            f"  {'*' if r['known'] else ' '} {r['name']:<24} {r['path']}" for r in d["projects"]))
+        return
+    if a.action == "add":
+        path = os.path.abspath(os.path.expanduser(a.target))
+        if not os.path.isdir(path):
+            die(f"no folder {path}")
+        known = cfg.get("projects") or {}
+        name = next((k for k, v in known.items() if os.path.expanduser(v["path"]) == path), None) \
+            or unique_name(cfg, a.name or os.path.basename(path))
+        save_user_config({"projects": {name: {"path": tilde(path), "opened": int(time.time())}}})
+        emit({"name": name, "path": tilde(path), "abs": path}, a.json, lambda d: f"{d['name']}: {d['path']}")
+        return
+    if a.action == "new":
+        name = slug(a.target, 40)
+        parent = os.path.abspath(os.path.expanduser(a.dir))
+        path = os.path.join(parent, name)
+        if os.path.exists(path):
+            die(f"{tilde(path)} already exists; use `drover project add {tilde(path)}`")
+        os.makedirs(parent, exist_ok=True)
+        if a.clone:
+            r = subprocess.run(["git", "clone", "--quiet", a.clone, path], capture_output=True, text=True)
+            if r.returncode != 0:
+                die(f"git clone failed: {r.stderr.strip()}")
+        else:
+            os.makedirs(path)
+            subprocess.run(["git", "init", "-q", "-b", "main", path], check=True)
+            with open(os.path.join(path, "README.md"), "w") as f:
+                f.write(f"# {a.target}\n")
+            subprocess.run(["git", "-C", path, "add", "README.md"], check=True)
+            subprocess.run(["git", "-C", path, "commit", "-q", "-m", "Start"], capture_output=True)
+            if a.github != "none":
+                r = subprocess.run(["gh", "repo", "create", name, f"--{a.github}", "--source", path, "--push"],
+                                   capture_output=True, text=True)
+                if r.returncode != 0:
+                    print(f"drover: GitHub repo not made: {r.stderr.strip()}", file=sys.stderr)
+        save_user_config({"projects": {name: {"path": tilde(path), "opened": int(time.time())}}})
+        emit({"name": name, "path": tilde(path), "abs": path, **git_facts(path)}, a.json,
+             lambda d: f"{d['name']}: {d['path']}")
+        return
+    if a.action == "open":
+        rows = {r["name"]: r for r in project_list(cfg)}
+        r = rows.get(a.target)
+        if not r:
+            die(f"no project {a.target!r}")
+        save_user_config({"projects": {r["name"]: {"path": r["path"], "opened": int(time.time())}}})
+        emit({**r, "abs": os.path.expanduser(r["path"])}, a.json, lambda d: d["abs"])
+        return
+    if a.action == "forget":
+        try:
+            with open(CONFIG) as f:
+                user = json.load(f)
+        except FileNotFoundError:
+            user = {}
+        (user.get("projects") or {}).pop(a.target, None)
+        write_json(CONFIG, user)
+        emit({"forgot": a.target}, a.json, lambda d: f"forgot {d['forgot']}")
+
+
+# ---------------------------------------------------------------- missions
+#
+# A mission is a goal in one project, run by a coordinator that plans and hands
+# out tasks. Each task gets a worker (own branch and worktree), then a reviewer
+# from another model family, then a merge. Agents talk through `drover say`,
+# which logs every message for the mission view and passes it on with hc send.
+# State lives on the machine drover runs on: ~/.local/state/drover/missions/<id>/.
+
+MISSIONS = os.path.join(STATE_DIR, "missions")
+
+COORDINATOR_BRIEF = """You are the drover project coordinator for {repo}.
+You receive missions over time, including more missions later via messages.
+Your initial mission is {mid}.
+Goal: {goal}
+
+Always pass --mission <mission-id> on every drover task, say, and mission command.
+Several missions can be running, and task ids are only unique within a mission.
+The commands below are for {mid}; use each other mission's own id when working on it.
+
+You plan and delegate; you don't write the feature code yourself.
+Small, tightly scoped tasks keep each worker's context small and fast; that is drover's edge over one
+long session. `drover map [--repo PATH]` prints a compact outline (files, line counts, top-level
+functions and classes with line numbers) so you can split work without reading everything.
+1. Read what you need of the code, then split the goal into small tasks:
+   - one concern per task, one branch each; under ~1 hour and under ~400 changed lines
+   - split by files or functions so parallel tasks never touch the same lines
+   - a real dependency gets --after, not a bigger task; prefer several small tasks over one big one
+   - the brief is self-contained: what to build, constraints, how to verify, so the worker needs no exploring
+   - always give --files (what to read first) and --done (how we know it is finished)
+2. Start each one with:
+     drover task add "<short title>" --brief "<what to build, which files, constraints, how to verify>" --mission {mid}
+   Always add: --files 'engine/drover:1234-1300,tests/test_engine.py' (paths, optional line ranges)
+   and --done '<done criteria>' (repeat it for several); optional --size S|M|L.
+   It prints the task id. The worker gets its own branch and worktree and reports to you.
+   Optional: --agent NAME [--model M] picks the agent (the role chain is the fallback if it is
+   out of capacity or not installed); --after t1[,t2] queues the task until those are merged
+   (it then starts from the updated base, automatically, when `drover task merge` runs).
+   `drover task review <id> --agent NAME` does the same for a reviewer (never the worker's family).
+3. When a worker reports done, run: drover task review <id> --mission {mid}
+   A reviewer from another model family checks it and sends you a verdict.
+4. Approved: drover task merge <id> --mission {mid}
+   Changes asked: drover say <id> "<what to fix>" --mission {mid} and review again when it reports done.
+5. Keep at most {parallel} tasks running at once for this mission; respect each mission's limit.
+   `drover mission show --mission {mid}` shows its state.
+6. After the last merge of a mission, when its goal is met, run:
+     drover mission done --mission {mid} "<summary>"
+   Also write the summary for the person. Remain available for other and future missions.
+UI tasks (anything under herdr/mods): put "a screenshot of it rendered (herdr-app shot) is attached" in --done
+and mention herdr/mods in --files or the brief; workers and reviewers then get the on-screen check steps.
+Talk to other agents only with `drover say`; never edit files in a worker's worktree.{extra}"""
+
+NEW_MISSION_MSG = """[drover] New mission {mid} for this project.
+Goal: {goal}
+Work on it like the others: plan, then delegate with --mission {mid} on every command:
+  drover task add "<title>" --brief "<...>" --mission {mid} --files 'path:10-40,other/path' --done "<criteria>" [--size S|M|L] [--agent NAME [--model M]] [--after t1,t2]
+  drover task review <id> --mission {mid}
+  drover task merge <id> --mission {mid}
+  drover say <id> "<text>" --mission {mid}
+Plan small: one concern per task, under ~1h and ~400 changed lines, split by files or functions so
+parallel tasks don't touch the same lines, --after for real dependencies, always --files and --done,
+and a self-contained brief so the worker needs no exploring. `drover map` outlines the repo.
+Keep at most {parallel} tasks running at once for this mission. Always pass --mission <id>:
+you coordinate several missions and task ids repeat between them.
+After the last merge, run: drover mission done --mission {mid} "<summary>"
+Also write the summary for the person."""
+
+WORKER_BRIEF = """You are a drover worker: task {tid} of mission {mid}.
+Task: {title}
+You are in your own git worktree on branch {branch}. Only change files here.
+
+{brief}
+{ui}
+When done: run the project's checks or tests, commit your work on this branch, then RUN
+this command in the shell (printing it in your final response does not report completion):
+  drover task done {tid} "<what you did and how you verified it>"
+Stuck, or the task is unclear: drover say coordinator "<your question>"
+Don't start other agents."""
+
+REVIEWER_BRIEF = """You are a drover reviewer: task {tid} of mission {mid}.
+Task: {title}
+The work is on branch {branch} in this worktree. See it with: git diff {base}...HEAD
+Brief the worker had:
+{brief}
+{done}{ui}
+Review for correctness bugs, missing tests, security problems, and whether it does what the brief asks and meets every 'Done when' item (if listed).
+Don't change any files. Finish by RUNNING exactly one of these commands in the shell.
+Printing the command in your final response does not submit a verdict:
+  drover task verdict {tid} approve "<short why>"
+  drover task verdict {tid} changes "<numbered list of concrete fixes>\""""
+
+
+UI_WORKER = """
+If you change a Herdr mod (herdr/mods/...), look at it rendered before you report done:
+1. herdr-app check herdr/mods/<mod> must pass; check herdr-app status for mod errors. Read herdr-app --skill once.
+2. Herdr loads mods from ~/.config/herdr-app/mods/<mod>, a symlink to the MAIN checkout, not your worktree.
+   Copy your mod folder to ~/.config/herdr-app/mods/<mod>-wip (mod.json title: "<Title> WIP") and open it:
+   herdr-app do tab.new --name <mod>-wip --mod <mod>-wip --props '<json props, e.g. demo data>'
+3. Wait ~2s, run herdr-app shot <scratch dir>/shot.png and LOOK at the PNG; repeat after each change.
+4. Attach the PNG path in your done report. Then close the tab (herdr-app do tab.close --id <id> --confirmed true)
+   and delete the -wip copy. Never use pointer/key automation on the person's display.
+"""
+
+UI_REVIEWER = """
+This change touches a Herdr mod (herdr/mods/...). Screenshot it yourself: herdr-app check herdr/mods/<mod>, copy the
+branch's mod to ~/.config/herdr-app/mods/<mod>-wip, open it with herdr-app do tab.new --mod <mod>-wip (see herdr-app --skill),
+wait ~2s, herdr-app shot <scratch dir>/shot.png and look at it. Then close the tab and delete the -wip copy.
+Reject UI work that was not seen rendered or that renders empty or broken; put your PNG path in the verdict.
+"""
+
+
+def touches_mods(t):
+    """True when the task's --files or brief mention herdr/mods."""
+    return "herdr/mods" in (t.get("brief") or "") or any("herdr/mods" in f.get("path", "") for f in t.get("files") or [])
+
+
+# ---- context packs: --files / --done / --size on a task
+
+RANGE_RE = re.compile(r"^(.*):(\d+)(?:-(\d+))?$")
+
+
+def parse_files(spec):
+    """'a/b.py:10-20,c.py' -> [{'path','start','end'}, ...]; start/end are None without a range."""
+    out = []
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        m_ = RANGE_RE.match(part)
+        if m_:
+            start, end = int(m_.group(2)), int(m_.group(3) or m_.group(2))
+            if end < start:
+                start, end = end, start
+            out.append({"path": m_.group(1).strip(), "start": start, "end": end})
+        else:
+            out.append({"path": part, "start": None, "end": None})
+    return out
+
+
+def check_files(repo, files):
+    """Warnings (never errors) for missing files and ranges past the end of a file."""
+    warnings = []
+    for f in files:
+        full = os.path.join(repo, f["path"])
+        if not os.path.exists(full):
+            warnings.append(f"--files: {f['path']} does not exist in {repo}")
+        elif f["start"] and os.path.isfile(full):
+            try:
+                with open(full, "rb") as fh:
+                    n = sum(1 for _ in fh)
+            except OSError:
+                continue
+            if f["start"] > n or f["end"] > n:
+                warnings.append(f"--files: {f['path']}:{f['start']}-{f['end']} is past the end of the file ({n} lines)")
+    return warnings
+
+
+def fmt_file(f):
+    if not f.get("start"):
+        return f["path"]
+    return f"{f['path']} (lines {f['start']}-{f['end']})" if f["end"] != f["start"] else f"{f['path']} (line {f['start']})"
+
+
+def render_brief(t):
+    """The worker-facing text: Read first, Done when, size, then the free-text brief."""
+    parts = []
+    if t.get("files"):
+        parts.append("Read first (only what is needed beyond these; don't explore the rest):\n"
+                     + "\n".join(f"- {fmt_file(f)}" for f in t["files"]))
+    if t.get("done"):
+        parts.append("Done when:\n" + "\n".join(f"- {d_}" for d_ in t["done"]))
+    if t.get("size"):
+        parts.append(f"Size: {t['size']} (keep the change this small; if it grows, tell the coordinator so it can be split)")
+    if parts:
+        parts.append("Brief:\n" + t["brief"])
+    else:
+        return t["brief"]
+    return "\n\n".join(parts)
+
+
+def worker_msg(mid, t, branch):
+    return WORKER_BRIEF.format(tid=t["id"], mid=mid, title=t["title"], branch=branch, brief=render_brief(t),
+                              ui=UI_WORKER if touches_mods(t) else "")
+
+
+def reviewer_msg(data, t):
+    done = ("\nDone when (check each one):\n" + "\n".join(f"- {d_}" for d_ in t["done"]) + "\n") if t.get("done") else ""
+    return REVIEWER_BRIEF.format(tid=t["id"], mid=data["id"], title=t["title"], branch=t["branch"],
+                                 base=data["base"], brief=t["brief"], done=done,
+                                 ui=UI_REVIEWER if touches_mods(t) else "")
+
+
+class Mission:
+    """mission.json plus log.jsonl, updated under a lock."""
+
+    def __init__(self, mid):
+        self.dir = os.path.join(MISSIONS, mid)
+        self.path = os.path.join(self.dir, "mission.json")
+        if not os.path.exists(self.path):
+            die(f"no mission {mid}")
+
+    def read(self):
+        with open(self.path) as f:
+            return json.load(f)
+
+    def update(self, fn):
+        import fcntl
+        with open(os.path.join(self.dir, ".lock"), "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            data = self.read()
+            out = fn(data)
+            data["updated"] = int(time.time())
+            write_json(self.path, data)
+            return out
+
+    def log(self, kind, frm, to, text, **extra):
+        entry = {"at": int(time.time()), "kind": kind, "from": frm, "to": to, "text": text, **extra}
+        with open(os.path.join(self.dir, "log.jsonl"), "a") as f:
+            f.write(json.dumps(entry) + "\n")
+        return entry
+
+    def entries(self, limit=200):
+        try:
+            with open(os.path.join(self.dir, "log.jsonl")) as f:
+                lines = f.readlines()
+        except FileNotFoundError:
+            return []
+        entries = []
+        for line in lines:
+            try:
+                entry = json.loads(line)
+                if isinstance(entry, dict):
+                    entries.append(entry)
+            except json.JSONDecodeError:  # a concurrent writer may not have finished its line
+                continue
+        return entries if limit is None else entries[-limit:] if limit else []
+
+
+def mission_archived(data, cfg):
+    if data.get("archived"):
+        return True
+    if data.get("state") != "done":
+        return False
+    since = max(data.get("done_at") or data.get("updated") or data.get("created") or 0,
+                data.get("unarchived_at") or 0)
+    return time.time() - since > cfg["missions"]["archive_after_days"] * 86400
+
+
+def mission_rows(repo=None, cfg=None):
+    """Shared mission listing, newest first; ignore incomplete mission files."""
+    cfg = cfg or load_config()
+    rows = []
+    for mid in sorted(os.listdir(MISSIONS), reverse=True) if os.path.isdir(MISSIONS) else []:
+        if not os.path.isfile(os.path.join(MISSIONS, mid, "mission.json")):
+            continue
+        try:
+            x = Mission(mid).read()
+            if repo is not None and os.path.realpath(x["repo"]) != os.path.realpath(repo):
+                continue
+            tasks = x.get("tasks", {})
+            rows.append({k: x.get(k) for k in ("id", "goal", "project", "repo", "state", "created", "created_ns", "updated", "summary")}
+                        | {"archived": mission_archived(x, cfg), "tasks": len(tasks), "merged": sum(t.get("state") == "merged" for t in tasks.values())})
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return sorted(rows, key=lambda r: (r.get("created_ns") or (r.get("created") or 0) * 10**9, r["id"]), reverse=True)
+
+
+def me():
+    """This terminal's drover labels (empty outside hc)."""
+    tid = os.environ.get("HC_TERMINAL_ID")
+    if not tid:
+        return {}
+    code, out, err = hc(["get", tid, "--json"])
+    try:
+        t = json.loads(out)
+        t = t.get("terminal", t)
+        return {**(t.get("labels") or {}), "_address": t.get("address", tid), "_cwd": t.get("cwd", "")}
+    except (json.JSONDecodeError, AttributeError):
+        return {}
+
+
+def same_address(a, b):
+    """Same terminal? An unqualified address belongs to this machine."""
+    def full(x):
+        return x if "/" in x else f"{local_name()}/{x}"
+    return bool(a and b) and full(a) == full(b)
+
+
+def running_missions(repo=None, coordinator=None):
+    """Running missions (newest first), optionally of one repo or one coordinator address."""
+    out = []
+    for r in mission_rows(repo):
+        if r["state"] != "running":
+            continue
+        m = Mission(r["id"])
+        if coordinator and not same_address(m.read().get("coordinator", {}).get("address"), coordinator):
+            continue
+        out.append(m)
+    return out
+
+
+def current_mission(a_mission=None):
+    if a_mission:
+        return Mission(a_mission)
+    lb = me()
+    if lb.get("drover.role") == "coordinator":
+        # A coordinator serves several missions: the newest running one is the default.
+        mine = running_missions(lb.get("drover.repo") or lb.get("_cwd") or None, lb.get("_address"))
+        if mine:
+            return mine[0]
+    mid = lb.get("drover.mission")
+    if mid:
+        return Mission(mid)
+    ids = sorted(os.listdir(MISSIONS), reverse=True) if os.path.isdir(MISSIONS) else []
+    if not ids:
+        die("no missions yet: drover mission start --repo <folder> \"<goal>\"")
+    return Mission(ids[0])
+
+
+def find_coordinator(repo):
+    """The live coordinator of this repo (any machine), as a mission's coordinator record, or None."""
+    real = os.path.realpath(repo)
+    known = {}
+    for m in running_missions(repo):
+        c = m.read().get("coordinator") or {}
+        if c.get("address"):
+            known.setdefault(c["address"], c)
+    terminals = None
+    for attempt in (1, 2):  # an inconclusive check is retried once, never read as "gone"
+        try:
+            terminals = drover_terminals(strict=True)
+            break
+        except Inconclusive as e:
+            problem = e
+    if terminals is None:
+        die(f"could not check whether {tilde(repo)} already has a coordinator ({problem}); "
+            "no mission was started and nothing was launched or adopted. Try again.")
+    for t in terminals:
+        lb = labels(t)
+        if lb.get("drover.role") != "coordinator" or not t.get("address"):
+            continue
+        place = lb.get("drover.repo") or t.get("cwd") or ""
+        if os.path.realpath(place) != real:
+            continue
+        rec = next((c for addr, c in known.items() if same_address(addr, t["address"])), None)
+        return rec or {"address": t["address"], "agent": lb.get("drover.agent"),
+                       "model": lb.get("drover.model") or None, "family": lb.get("drover.family"),
+                       "machine": machine_of(t["address"]), "started": int(time.time())}
+    return None
+
+
+def mission_digest(data):
+    lines = [f"- {data['id']} (at most {data.get('parallel', 3)} tasks at once"
+             f"{', auto: its workers and reviewers run unattended' if data.get('auto') else ''}): {data['goal']}"]
+    if data.get("images"):
+        lines.append("    images: " + ", ".join(data["images"]))
+    for t in data.get("tasks", {}).values():
+        rv = (t.get("review") or {}).get("verdict")
+        lines.append(f"    {t['id']} [{t['state']}{'/' + rv if rv else ''}] {t['title'][:70]}")
+    if not data.get("tasks"):
+        lines.append("    (no tasks yet)")
+    return "\n".join(lines)
+
+
+def hc_send(address, text):
+    code, out, err = hc(["send", address, text], timeout=90)
+    return code == 0, (err or out).strip()
+
+
+def who(data, name):
+    """An agent's address from how agents name each other: coordinator,
+    a task id (its worker), review:<task id>, or an hc address."""
+    if name == "coordinator":
+        return data["coordinator"].get("address")
+    if name.startswith("review:"):
+        return (data["tasks"].get(name[7:]) or {}).get("review", {}).get("address")
+    if name in data["tasks"]:
+        return data["tasks"][name].get("address")
+    return name
+
+
+def speaker():
+    lb = me()
+    role = lb.get("drover.role")
+    if role == "coordinator":
+        return "coordinator"
+    if role == "reviewer":
+        return f"review:{lb.get('drover.task-id', '?')}"
+    if role:
+        return lb.get("drover.task-id") or lb.get("_address", "?")
+    return "person"
+
+
+# --------------------------------------------------------- dashboard tokens
+
+TOKEN_KEYS = ("input", "output", "cache_read", "cache_write", "total")
+
+
+def timestamp(value):
+    if isinstance(value, (int, float)):
+        return value
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def sum_tokens(values):
+    known = [v for v in values if v is not None]
+    return {k: sum(v.get(k, 0) for v in known) for k in TOKEN_KEYS} if known else None
+
+
+class TokenUsage:
+    """Index local CLI logs once, then reuse unchanged files across polls.
+
+    Remote usage is unknown: polling must not wait on an offline machine.
+    Session selection is deliberately conservative, especially in the shared
+    coordinator cwd: take the first session after launch, or the closest one
+    within the preceding minute (agent startup can precede our state write).
+    """
+
+    def __init__(self):
+        self.path = os.path.join(STATE_DIR, "tokens-cache.json")
+        self.dirty = False
+        self.index = {}
+        try:
+            with open(self.path) as f:
+                cache = json.load(f)
+            self.files = cache["files"] if cache.get("version") == 1 else {}
+            if not isinstance(self.files, dict):
+                self.files = {}
+            self.results = cache.get("results") if isinstance(cache.get("results"), dict) else {}
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            self.files = {}
+            self.results = {}
+
+    def read(self, path, agent):
+        try:
+            stat = os.stat(path)
+            signature = [stat.st_mtime_ns, stat.st_size]
+            cached = self.files.get(path)
+            if isinstance(cached, dict) and cached.get("signature") == signature:
+                return cached["session"]
+            session = {"started": None, "cwd": None, "tokens": None}
+            messages = {}
+            with open(path) as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                        if not isinstance(entry, dict):
+                            continue
+                        if session["started"] is None:
+                            session["started"] = timestamp(entry.get("timestamp"))
+                        if agent == "claude" and entry.get("type") == "assistant":
+                            message = entry.get("message") or {}
+                            usage = message.get("usage")
+                            if not isinstance(usage, dict):
+                                continue
+                            tokens = {"input": usage.get("input_tokens", 0),
+                                      "output": usage.get("output_tokens", 0),
+                                      "cache_read": usage.get("cache_read_input_tokens", 0),
+                                      "cache_write": usage.get("cache_creation_input_tokens", 0)}
+                            # Streaming copies can contain a later, larger output count.
+                            key = message.get("id") or entry.get("uuid") or str(len(messages))
+                            previous = messages.get(key, {})
+                            tokens = {k: max(v or 0, previous.get(k, 0)) for k, v in tokens.items()}
+                            tokens["total"] = sum(tokens.values())
+                            messages[key] = tokens
+                        elif agent == "codex":
+                            payload = entry.get("payload") or {}
+                            if entry.get("type") == "session_meta":
+                                session["cwd"] = payload.get("cwd")
+                                session["started"] = timestamp(payload.get("timestamp")) or session["started"]
+                            elif entry.get("type") == "event_msg" and payload.get("type") == "token_count":
+                                usage = (payload.get("info") or {}).get("total_token_usage")
+                                if not isinstance(usage, dict):
+                                    continue
+                                # Codex input already includes cached input, unlike Claude.
+                                cached_input = usage.get("cached_input_tokens", 0) or 0
+                                input_ = usage.get("input_tokens", 0) or 0
+                                output = usage.get("output_tokens", 0) or 0
+                                session["tokens"] = {"input": max(0, input_ - cached_input), "output": output,
+                                                     "cache_read": cached_input,
+                                                     "cache_write": usage.get("cache_write_input_tokens", 0) or 0,
+                                                     "total": usage.get("total_tokens", input_ + output)}
+                    except (ValueError, TypeError, AttributeError):
+                        continue  # partial writes and unfamiliar records are harmless
+            if agent == "claude":
+                session["tokens"] = sum_tokens(messages.values())
+            self.files[path] = {"signature": signature, "session": session}
+            self.dirty = True
+            return session
+        except (OSError, UnicodeError, KeyError):
+            return None
+
+    RESULT_TTL = 30  # seconds a scan result is reused, so a 1.5s dashboard poll stays cheap
+
+    def get(self, agent, cwd, started, machine, until=None):
+        if agent not in ("claude", "codex") or not cwd or machine not in (None, local_name()):
+            return None
+        key = json.dumps([agent, cwd, started, machine, until])
+        hit = self.results.get(key)
+        if isinstance(hit, list) and len(hit) == 2 and 0 <= time.time() - hit[0] < self.RESULT_TTL:
+            return hit[1]
+        value = self._scan(agent, cwd, started, until)
+        self.results[key] = [time.time(), value]
+        self.dirty = True
+        return value
+
+    def _scan(self, agent, cwd, started, until):
+        cwd = os.path.abspath(os.path.expanduser(cwd))
+        key = (agent, cwd if agent == "claude" else None)
+        if key not in self.index:
+            if agent == "claude":
+                folder = cwd.replace("/", "-").replace(".", "-")
+                paths = glob.glob(os.path.join(HOME, ".claude", "projects", glob.escape(folder), "*.jsonl"))
+            else:
+                paths = glob.glob(os.path.join(HOME, ".codex", "sessions", "*", "*", "*", "rollout-*.jsonl"))
+            self.index[key] = [s for p in paths if (s := self.read(p, agent)) is not None]
+        sessions = [s for s in self.index[key]
+                    if s.get("started") is not None and s["started"] >= started - 60
+                    and (until is None or s["started"] < until)
+                    and (agent == "claude" or s.get("cwd") == cwd)]
+        after = [s for s in sessions if s["started"] >= started]
+        if after:
+            closest = min(s["started"] for s in after)
+        elif sessions:
+            closest = max(s["started"] for s in sessions)
+        else:
+            return None
+        return sum_tokens(s["tokens"] for s in sessions if s["started"] == closest)
+
+    def save(self):
+        for path in list(self.files):
+            if not os.path.exists(path):
+                del self.files[path]
+                self.dirty = True
+        if self.dirty:
+            now = time.time()
+            self.results = {k: v for k, v in self.results.items()
+                            if isinstance(v, list) and 0 <= now - v[0] < self.RESULT_TTL}
+            try:
+                write_json(self.path, {"version": 1, "files": self.files, "results": self.results})
+            except OSError:
+                pass  # read-only state directories must not break the dashboard
+
+
+def activity_text(status, msg, out_until=None, now=None):
+    """One plain-language line for what an agent is doing."""
+    if out_until:
+        return f"sleeping until {fmt_until(out_until, now)}"
+    if status == "blocked":
+        return "waiting for you"
+    if status == "gone":
+        return "terminal closed"
+    return " ".join(str(msg).split()) if msg else {"idle": "idle", "done": "finished"}.get(status, "working")
+
+
+def needs_you_action(impediment, agent, mission_id):
+    """The command the person runs to clear an impediment that only they can clear, or None."""
+    if impediment["kind"] == "needs_you" and agent and agent.get("address"):
+        return f"hc attach {agent['address']}"
+    if impediment["kind"] == "merge_failed" and impediment.get("task"):
+        return f"drover task merge {impediment['task']} --mission {mission_id}"
+    return None
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+
+
+def cmd_peek(a, cfg):
+    data = current_mission(a.mission).read()
+    addr = who(data, a.who)
+    if not addr:
+        die(f"nobody called {a.who!r} in mission {data['id']}")
+    code, screen, err = hc(["read", addr, "--lines", str(a.lines)], timeout=20)
+    if code != 0:
+        die(f"could not read {a.who} ({addr}): {(err or screen).strip()}")
+    lines = [ln.rstrip() for ln in ANSI_RE.sub("", screen).replace("\r", "").split("\n")]
+    while lines and not lines[-1]:
+        lines.pop()
+    status, msg = "", None
+    code, got, _ = hc(["get", addr, "--json"], timeout=20)
+    try:
+        t = json.loads(got) if code == 0 else {}
+        t = t.get("terminal", t)
+        raw = t.get("status")
+        status = (raw.get("state") if isinstance(raw, dict) else raw) or ""
+        msg = (raw.get("msg") if isinstance(raw, dict) else t.get("msg")) or None
+    except (ValueError, AttributeError):
+        pass
+    emit({"who": a.who, "address": addr, "lines": lines, "status": status, "msg": msg},
+         a.json, lambda d: "\n".join(d["lines"]))
+
+
+def cmd_dashboard(a, cfg):
+    repo = os.path.abspath(os.path.expanduser(a.repo))
+    rows = [r for r in mission_rows(repo, cfg) if a.all or not r["archived"]]
+    selected = next((r for r in rows if r["id"] == a.mission), None) if a.mission else next(
+        (r for r in rows if r["state"] == "running"), next((r for r in rows if not r["archived"]), None))
+    if a.mission and selected is None:
+        die(f"no mission {a.mission} for {repo}")
+    now = int(time.time())
+    result = {"project": (selected or {}).get("project") or os.path.basename(repo), "repo": repo,
+              "missions": [{k: r[k] for k in ("id", "goal", "state", "created", "updated", "tasks", "merged", "archived", "summary")}
+                           for r in rows],
+              "mission": None, "agents": [], "tasks": [],
+              "tokens": {"total": 0, "coordinator": 0, "worker": 0, "reviewer": 0},
+              "impediments": [], "needs_you": [], "log": [], "generated": now}
+    out = agents_out()
+    result["capacity"] = sorted(
+        ({"agent": ag, "name": cfg["agents"].get(ag, {}).get("name") or ag, "machine": e.get("machine"),
+          "until": e["until"], "reason": e.get("reason"), "since": e.get("since")} for ag, e in out.items()),
+        key=lambda c: (c["until"], c["agent"]))
+    # 'capacity' stays a list of outages (the herdr mod maps over it), so usage is a sibling key.
+    result["usage"] = usage_list(cfg, now)
+    if selected:
+        m = Mission(selected["id"])
+        data = m.read()
+        entries = m.entries(None)
+        result["mission"] = {k: data.get(k) for k in ("id", "goal", "state", "base", "created", "updated", "summary")}
+        result["mission"]["archived"] = selected["archived"]
+        result["mission"]["auto"] = bool(data.get("auto"))
+        result["mission"]["images"] = data.get("images") or []
+        result["log"] = entries[-40:]
+        live = {t["address"]: t for t in drover_terminals() if t.get("address")}
+        usage = TokenUsage()
+
+        def impediment(kind, severity, who_, task, text, since):
+            if data["state"] == "done" or selected["archived"] or data.get("tasks", {}).get(task, {}).get("state") == "dropped":
+                return
+            result["impediments"].append({"kind": kind, "severity": severity, "who": who_, "task": task,
+                                          "text": " ".join(str(text).split()), "since": int(since)})
+
+        def alternatives(task):
+            role = {"working": "worker", "changes": "worker", "review": "reviewer"}.get(task["state"])
+            if not role or (role == "reviewer" and not task.get("review")):
+                return []
+            return task_alternatives(cfg, task, role, machine_tools(cfg, task.get("machine")), out, now)
+
+        def add_agent(record, role, task, title, cwd, until=None):
+            tid = task.get("id") if task else None
+            who_ = "coordinator" if role == "coordinator" else f"review:{tid}" if role == "reviewer" else tid
+            started = record.get("started") or (task or data).get("created") or now
+            terminal = live.get(record.get("address"))
+            lb = labels(terminal or {})
+            raw = (terminal or {}).get("status")
+            state = raw.get("state") if isinstance(raw, dict) else raw
+            msg = raw.get("msg") if isinstance(raw, dict) else (terminal or {}).get("msg")
+            missing = terminal is not None and not state and now - started > 60
+            status = ("gone" if terminal is None else "blocked" if state in ("blocked", "error") or missing
+                      else state if state in ("working", "idle", "done")
+                      else "done" if terminal.get("state") in ("exited", "finished", "dead") else "working")
+            agent = {"who": who_, "role": role, "task": tid, "title": title,
+                     **{k: record.get(k) or lb.get(f"drover.{k}") or None for k in ("agent", "model", "family")},
+                     "machine": record.get("machine"), "address": record.get("address"),
+                     "status": status, "msg": msg or None, "started": started}
+            agent["tokens"] = usage.get(agent["agent"], cwd, started, agent["machine"], until)
+            result["agents"].append(agent)
+            result["tokens"][role] += (agent["tokens"] or {}).get("total", 0)
+            since = ((terminal or {}).get("status_ms") or 0) / 1000 or started
+            hit = out.get(CAPACITY_ALIASES.get(agent["agent"], agent["agent"]))
+            sleeping = bool(hit and status != "gone" and hit.get("machine") in (None, agent["machine"]))
+            agent["since"] = int(since)
+            agent["activity"] = activity_text(status, msg, hit["until"] if sleeping else None, now)
+            if sleeping:
+                impediment("capacity", "warn", who_, tid,
+                           f"{agent['agent']} is out of capacity until {fmt_until(hit['until'])} ({hit.get('reason')})",
+                           hit.get("since") or now)
+            if status == "blocked":
+                impediment("needs_you", "block", who_, tid,
+                           "waiting on a prompt, no status since start" if missing else msg or "agent needs your attention",
+                           started if missing else since)
+            if status == "gone" and data["state"] == "running" and (not task or task["state"] != "merged"):
+                impediment("gone", "block", who_, tid, "agent terminal no longer exists", (task or data).get("updated") or started)
+            if role == "worker" and task["state"] in ("working", "changes") and status == "idle":
+                stale_since = max(task.get("updated") or started, since)
+                if now - stale_since > 1800:
+                    impediment("stale", "warn", who_, tid, "no task update and agent idle for over 30 minutes", stale_since)
+            return agent["tokens"]
+
+        add_agent(data.get("coordinator") or {}, "coordinator", None, data["goal"], repo)
+        for tid, task in data.get("tasks", {}).items():
+            task = {**task, "id": tid}
+            if task["state"] == "queued":  # no worktree or agent yet
+                result["tasks"].append({**{k: task.get(k) for k in ("id", "title", "state", "agent", "model", "created", "updated")},
+                                        "machine": None, "branch": None, "reason": None, "depends_on": task.get("depends_on", []), "alternatives": [],
+                                        "rounds": 0, "review": None, "tokens": sum_tokens([])})
+                continue
+            logs = [e for e in entries if e.get("task") == tid]
+            reviews = task.get("review_history", []) + ([task["review"]] if task.get("review") else [])
+            # Bound session matching when a worker and reviewer use the same CLI/cwd.
+            starts = [r.get("started") for r in reviews if r.get("started")]
+            tokens = [add_agent(task, "worker", task, task["title"], task.get("worktree"), min(starts) if starts else None)]
+            for i, review in enumerate(reviews):
+                until = reviews[i + 1].get("started") if i + 1 < len(reviews) else None
+                if i == len(reviews) - 1:
+                    tokens.append(add_agent(review, "reviewer", task, f"Review: {task['title']}", task.get("worktree"), until))
+                else:
+                    prior = usage.get(review.get("agent"), task.get("worktree"),
+                                      review.get("started") or task["created"], review.get("machine"), until)
+                    tokens.append(prior)
+                    result["tokens"]["reviewer"] += (prior or {}).get("total", 0)
+            rv = task.get("review")
+            result["tasks"].append({**{k: task.get(k) for k in ("id", "title", "state", "agent", "model", "machine", "branch", "created", "updated", "reason")},
+                                    "depends_on": task.get("depends_on", []), "alternatives": alternatives(task),
+                                    "rounds": sum(e.get("kind") == "review" for e in logs),
+                                    "review": {k: rv.get(k) for k in ("agent", "model", "family", "verdict")} if rv else None,
+                                    "tokens": sum_tokens(tokens)})
+            if task["state"] == "changes":
+                verdict = next((e for e in reversed(logs) if e.get("kind") == "verdict"), {})
+                impediment("changes", "warn", tid, tid, verdict.get("text") or "review requested changes",
+                           verdict.get("at") or task["updated"])
+            merge = next((e for e in reversed(logs) if e.get("kind") == "merge"), {})
+            if merge.get("failed") and task["state"] != "merged":
+                impediment("merge_failed", "block", tid, tid, merge.get("text") or "merge failed", merge["at"])
+        if data["state"] == "stopped" and any(t["state"] not in ("merged", "dropped") for t in data.get("tasks", {}).values()):
+            impediment("stopped", "warn", "coordinator", None, "mission stopped with unmerged tasks", data["updated"])
+        result["tokens"]["total"] = sum(result["tokens"][k] for k in ("coordinator", "worker", "reviewer"))
+        by_who = {x["who"]: x for x in result["agents"]}
+        for i in result["impediments"]:
+            action = needs_you_action(i, by_who.get(i["who"]), data["id"])
+            if action:
+                result["needs_you"].append({**i, "action": action})
+        usage.save()
+    emit(result, a.json, fmt_dashboard)
+
+
+def fmt_dashboard(data):
+    mission = data["mission"]
+    lines = [f"{data['project']}  {data['repo']}"]
+    lines.extend(f"Out: {c['name']} until {fmt_until(c['until'], data['generated'])}"
+                 + (f" ({c['reason']})" if c.get("reason") else "") + (f" on {c['machine']}" if c.get("machine") else "")
+                 for c in data.get("capacity") or [])
+    if not mission:
+        return "\n".join(lines + ["  No missions yet."])
+    lines.append(f"{mission['id']}  {mission['state']}  {mission['goal']}")
+    lines.extend(f"  {a['who']:<12} {a['status']:<8} {a['agent']}@{a['machine']}"
+                 + (f"  {a['msg']}" if a['msg'] else "") for a in data["agents"])
+    lines.extend(f"  {t['id']:<4} {t['state']:<9} {t['title']}  ({t['rounds']} reviews)" for t in data["tasks"])
+    lines.append("  Tokens: " + ", ".join(f"{k}={v:,}" for k, v in data["tokens"].items()))
+    lines.extend(f"  {i['severity'].upper()} {i['who']}: {i['text']}" for i in data["impediments"])
+    return "\n".join(lines)
+
+
+@contextlib.contextmanager
+def repo_lock(repo):
+    """Serialize mission starts per canonical repo path (lookup, launch, adoption)."""
+    import fcntl
+    d = os.path.join(STATE_DIR, "locks")
+    os.makedirs(d, exist_ok=True)
+    name = "mission-start-" + hashlib.sha256(os.path.realpath(repo).encode()).hexdigest()[:24] + ".lock"
+    with open(os.path.join(d, name), "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
+def mission_extras(data):
+    """What a coordinator must know about a mission beyond its goal: unattended and attached images."""
+    out = ""
+    if data.get("auto"):
+        out += (f"\n\nMission {data['id']} is AUTO (unattended): every worker and reviewer you start for it runs "
+                "with its CLI's autonomy flags and never waits for approvals. Don't ask the person to approve "
+                "commands; if you were started without such flags yourself, say so in your report.")
+    if data.get("images"):
+        out += ("\n\nAttached images for this mission (absolute paths): " + json.dumps(data["images"]) +
+                "\nRead them with your file tools before planning, and point workers to the paths they need.")
+    return out
+
+
+def warn_remote_images(images, machine):
+    if images and hc_target(machine) is not None:
+        print(f"drover: warning: images are local to {local_name()}; the coordinator runs on {machine} "
+              "and may not be able to read them (they are not copied over hc)", file=sys.stderr)
+
+
+def mission_start(a, cfg):
+    if not a.goal:
+        die("give the mission a goal")
+    repo = os.path.abspath(os.path.expanduser(a.repo))
+    facts = git_facts(repo)
+    if not facts:
+        die(f"{tilde(repo)} is not a git repo")
+    sources = [os.path.abspath(os.path.expanduser(p)) for p in (a.image or [])]
+    for path in sources:
+        if not os.path.isfile(path):
+            die(f"image is missing or not a file: {path}")
+    coord = find_coordinator(repo)  # may die when hc cannot be checked: before anything is created
+    mid = time.strftime("%y%m%d-%H%M") + "-" + slug(a.goal, 20)
+    mdir = os.path.abspath(os.path.join(MISSIONS, mid))
+    os.makedirs(mdir)
+    images = []
+    if sources:
+        os.makedirs(os.path.join(mdir, "images"))
+        for n, path in enumerate(sources, 1):
+            dest = os.path.join(mdir, "images", f"{n}{os.path.splitext(path)[1] or '.img'}")
+            try:
+                shutil.copyfile(path, dest)
+            except OSError as e:
+                shutil.rmtree(mdir)
+                die(f"could not copy image {path}: {e}")
+            images.append(dest)
+    data = {"id": mid, "goal": a.goal, "parallel": a.parallel, "auto": bool(a.auto), "images": images, "repo": repo, "project": os.path.basename(repo),
+            "base": facts.get("branch") or "main", "created": int(time.time()), "created_ns": time.time_ns(), "updated": int(time.time()),
+            "space": a.space or None, "state": "starting", "coordinator": {}, "tasks": {}, "next_task": 1}
+    write_json(os.path.join(mdir, "mission.json"), data)
+    m = Mission(mid)
+    m.log("mission", "person", "coordinator", a.goal)
+    # Adopt-or-reuse: one coordinator per project.
+    others = [x for x in running_missions(repo) if x.read()["id"] != mid]
+    if coord:
+        m.update(lambda x: x.update({"state": "running", "coordinator": coord}))
+        msg = NEW_MISSION_MSG.format(mid=mid, goal=a.goal, parallel=a.parallel) + mission_extras(data)
+        warn_remote_images(images, coord["machine"])
+        ok, err = hc_send(coord["address"], msg)
+        if not ok:
+            print(f"drover: warning: could not message the coordinator ({err})", file=sys.stderr)
+        m.log("mission", "drover", "coordinator", f"assigned to the project's coordinator ({coord['address']})")
+        ensure_watcher(cfg)
+        emit({"mission": m.read(), "coordinator": coord, "reused": True, "notified": ok}, a.json,
+             lambda x: f"mission {mid}: existing coordinator {coord['agent']} on {coord['machine']} ({coord['address']})")
+        return
+    brief = COORDINATOR_BRIEF.format(mid=mid, repo=tilde(repo), goal=a.goal, parallel=a.parallel,
+                                     extra=mission_extras(data))
+    if others:
+        brief += ("\n\nThe previous coordinator is gone. You also take over these still-running missions "
+                  "(pass each one's own --mission id):\n" + "\n".join(mission_digest(x.read()) for x in others))
+    extra = {"drover.repo": repo}
+    if a.space:  # show the coordinator as one tab per project in the project's space
+        extra.update({"herdr.space": a.space, "herdr.tab": coordinator_tab(repo)})
+    started = int(time.time())
+    d = start_agent(cfg, "coordinator", repo, brief, a.goal, labels_extra=extra,
+                    name=f"coord-{slug(os.path.basename(repo), 16)}-{time.strftime('%m%d%H%M')}", auto=a.auto)
+    if not d["agent"]:
+        shutil.rmtree(mdir)
+        emit(d, a.json, fmt_route)
+        sys.exit(3)
+    warn_remote_images(images, d["machine"])
+    coord = {"address": d["address"], "agent": d["agent"], "model": d.get("model"),
+             "family": d["family"], "machine": d["machine"], "started": started}
+    m.update(lambda x: x.update({"state": "running", "coordinator": coord}))
+    for x in others:
+        x.update(lambda y: y.update({"coordinator": coord}))
+        x.log("mission", "drover", "coordinator", f"adopted by new coordinator ({coord['address']})")
+    ensure_watcher(cfg)
+    emit({"mission": m.read(), "route": d, "adopted": [x.read()["id"] for x in others]}, a.json,
+         lambda x: f"mission {mid}: coordinator {d['agent']} on {d['machine']} ({d['address']})")
+    return
+
+
+def cmd_mission(a, cfg):
+    if a.action == "start":
+        repo = os.path.abspath(os.path.expanduser(a.repo))
+        with repo_lock(repo):
+            return mission_start(a, cfg)
+    if a.action == "list":
+        rows = mission_rows(os.path.abspath(os.path.expanduser(a.repo)) if a.repo != "." else None, cfg)
+        rows = [r for r in rows if a.all or not r["archived"]]
+        emit({"missions": rows}, a.json, lambda d: "\n".join(
+            f"  {r['id']:<34} {r['state']:<9} {r['merged']}/{r['tasks']}  {r['goal'][:60]}" for r in d["missions"]))
+        return
+    if a.action in ("archive", "unarchive") and not a.goal:
+        die(f"give the mission id: drover mission {a.action} <id>")
+    m = current_mission(a.goal if a.action in ("archive", "unarchive") else a.mission)
+    if a.action == "done":
+        if not a.goal.strip():
+            die("give the mission a summary")
+
+        def finish(x):
+            active = [tid for tid, t in x.get("tasks", {}).items()
+                      if t["state"] in ("working", "review", "changes", "approved")]
+            if active and not a.force:
+                die(f"tasks still active: {', '.join(active)}; use --force to finish anyway")
+            x.update(state="done", summary=a.goal, done_at=x.get("done_at") or int(time.time()))
+        m.update(finish)
+        m.log("done", "coordinator", "person", a.goal)
+        emit({"mission": m.read()["id"], "state": "done", "summary": a.goal}, a.json,
+             lambda d: f"{d['mission']} done: {d['summary']}")
+        return
+    if a.action in ("archive", "unarchive"):
+        def archive(x):
+            if x["state"] not in ("done", "stopped"):
+                die("only done or stopped missions can be archived or unarchived")
+            x["archived"] = a.action == "archive"
+            if not x["archived"]:
+                x["unarchived_at"] = int(time.time())
+        m.update(archive)
+        m.log(a.action, "person", "mission", a.action)
+        emit({"mission": a.goal, "archived": a.action == "archive"}, a.json,
+             lambda d: f"{a.goal} {a.action}d")
+        return
+    if a.action == "show":
+        data = m.read()
+        data.setdefault("auto", False)
+        data.setdefault("images", [])
+        live = {t["address"]: t for t in drover_terminals()}
+        for who_ in [data["coordinator"], *data["tasks"].values(), *[t.get("review", {}) for t in data["tasks"].values()]]:
+            t = live.get(who_.get("address"))
+            who_["status"] = ((t.get("status") or "running") if t else ("gone" if who_.get("address") else None))
+        data["log"] = m.entries(a.log)
+
+        def text(d):
+            lines = [f"{d['id']}  {d['state']}  {d['goal']}",
+                     f"  coordinator {d['coordinator'].get('agent')} on {d['coordinator'].get('machine')} ({d['coordinator'].get('status')})"]
+            for t in d["tasks"].values():
+                rv = t.get("review", {})
+                where = f"{t['agent']}@{t['machine']}" if t.get("machine") else "-"
+                lines.append(f"  {t['id']:<4} {t['state']:<9} {where}  {t['title'][:50]}"
+                             + (f"  after {','.join(t['depends_on'])}" if t.get("depends_on") else "")
+                             + (f"  review: {rv.get('agent')} {rv.get('verdict') or ''}" if rv else ""))
+            return "\n".join(lines)
+        emit(data, a.json, text)
+        return
+    if a.action == "stop":
+        data = m.read()
+        # Same lock as mission start: no new mission may adopt the coordinator between the
+        # shared-coordinator check and the kill.
+        with repo_lock(data["repo"]):
+            m.update(lambda x: x.update({"state": "stopped"}))
+            caddr = data["coordinator"].get("address")
+            shared = any(same_address(caddr, x.read()["coordinator"].get("address")) for x in running_missions(data["repo"]))
+            for addr in [None if shared else caddr, *[t.get("address") for t in data["tasks"].values()],
+                         *[t.get("review", {}).get("address") for t in data["tasks"].values()]]:
+                if addr:
+                    hc(["kill", addr])
+        m.log("mission", "person", "all", "stopped")
+        emit({"stopped": data["id"]}, a.json, lambda d: f"stopped {d['stopped']}")
+
+
+ACTIVE_STATES = ("working", "done", "review", "changes", "approved")
+
+
+def project_test_command(cfg, repo, worktree):
+    """The test command for a repo: its `projects` entry's test_command, else unittest if there is a tests/ folder."""
+    real = os.path.realpath(repo)
+    for v in (cfg.get("projects") or {}).values():
+        if os.path.realpath(os.path.expanduser(v.get("path", ""))) == real and v.get("test_command"):
+            return v["test_command"]
+    if os.path.isdir(os.path.join(worktree, "tests")):
+        return "python3 -m unittest discover tests"
+    return None
+
+
+def auto_resolve_merge(cfg, repo, base, worktree, test_command=None):
+    """Merge `base` into the task branch in its worktree, resolving only safe conflicts, and test the result.
+    Returns (ok, detail, conflicting files). On failure the worktree is back at its pre-merge commit."""
+    import fnmatch
+    import tempfile
+
+    def git(*args, **kw):
+        return subprocess.run(["git", "-C", worktree, *args], capture_output=True, text=True, **kw)
+    if not os.path.isdir(worktree):
+        return False, "worktree not available", []
+    pre = git("rev-parse", "HEAD").stdout.strip()
+    if not pre:
+        return False, "worktree not available", []
+
+    def undo():
+        if git("rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0:
+            git("merge", "--abort")
+        git("reset", "--hard", pre)
+    r = git("merge", "--no-edit", base)
+    conflicts = []
+    if r.returncode != 0:
+        conflicts = git("diff", "--name-only", "--diff-filter=U").stdout.split()
+        if not conflicts:
+            undo()
+            return False, (r.stdout + r.stderr).strip()[:300], []
+        patterns = (cfg.get("merge") or {}).get("auto_union") or []
+        for f in conflicts:
+            if not any(fnmatch.fnmatch(f, pat) for pat in patterns):
+                undo()
+                return False, f"conflict in {f} is not safe to union", conflicts
+            with tempfile.TemporaryDirectory() as tmp:
+                parts = []
+                for n, stage in enumerate((2, 1, 3)):
+                    path = os.path.join(tmp, str(n))
+                    g = git("show", f":{stage}:{f}")
+                    with open(path, "w") as fh:
+                        fh.write(g.stdout if g.returncode == 0 else "")
+                    parts.append(path)
+                mf = subprocess.run(["git", "merge-file", "--union", "-p", *parts], capture_output=True, text=True)
+                if mf.returncode < 0 or mf.returncode == 255:
+                    undo()
+                    return False, f"could not union {f}", conflicts
+                target = os.path.join(tmp, "out" + os.path.splitext(f)[1])
+                with open(target, "w") as fh:
+                    fh.write(mf.stdout)
+                check = (["python3", "-m", "py_compile", target] if f.endswith(".py")
+                         else ["node", "--check", target] if f.endswith(".js") else None)
+                if check and subprocess.run(check, capture_output=True).returncode != 0:
+                    undo()
+                    return False, f"union of {f} does not parse", conflicts
+                shutil.copyfile(target, os.path.join(worktree, f))
+            git("add", "--", f)
+        c = git("commit", "--no-edit")
+        if c.returncode != 0:
+            undo()
+            return False, (c.stdout + c.stderr).strip()[:300], conflicts
+    test_command = test_command or project_test_command(cfg, repo, worktree)
+    if test_command:
+        try:
+            t = subprocess.run(test_command, shell=True, cwd=worktree, capture_output=True, text=True, timeout=900)
+            ok, tail = t.returncode == 0, (t.stdout + t.stderr).strip()[-300:]
+        except subprocess.TimeoutExpired:
+            ok, tail = False, "tests timed out"
+        if not ok:
+            undo()
+            return False, f"tests failed after merging {base}: {tail}", conflicts
+    return True, "merged " + base + (" (union: " + ", ".join(conflicts) + ")" if conflicts else ""), conflicts
+
+
+def start_ready_tasks(cfg, m):
+    """Start queued tasks whose dependencies are all merged, up to the mission's parallel limit.
+    The worktree is cut from the repo's current HEAD, so it includes the merged work.
+    Returns the started task records; the rest stay queued for a later call."""
+    started, skipped = [], set()
+    while True:
+        data = m.read()
+        tasks = data["tasks"]
+        active = sum(t["state"] in ACTIVE_STATES for t in tasks.values())
+        if active >= data.get("parallel", 3):
+            break
+        nxt = next((t for t in tasks.values() if t["state"] == "queued"
+                    and t["id"] not in skipped
+                    and all(tasks.get(d_, {}).get("state") == "merged" for d_ in t.get("depends_on", []))), None)
+        if not nxt:
+            break
+        tid = nxt["id"]
+        branch = f"{BRANCH_PREFIX}{slug(nxt['title'])}-{time.strftime('%m%d%H%M')}"
+        deps = ", ".join(nxt.get("depends_on", []))
+        msg = worker_msg(data["id"], nxt, branch) \
+            + f"\n\nNote: this task was queued behind {deps}, which is merged into {data['base']}; your branch already includes it."
+        try:
+            d = start_agent(cfg, nxt.get("role", "worker"), data["repo"], msg, nxt["title"], branch=branch,
+                            name=f"{tid}-{slug(nxt['title'], 20)}",
+                            labels_extra={"drover.mission": data["id"], "drover.task-id": tid},
+                            auto=bool(data.get("auto")), prefer_agent=nxt.get("agent_pref"), prefer_model=nxt.get("model_pref"))
+        except SystemExit:
+            d = {"agent": None}
+        if not d.get("agent"):
+            m.log("task", "drover", "coordinator", f"{tid} is ready ({deps} merged) but no agent could start it; left queued", task=tid, failed=True)
+            skipped.add(tid)  # try the next ready task for the free slot
+            continue
+        now = int(time.time())
+        info = {"state": "working", "agent": d["agent"], "model": d.get("model"), "family": d["family"],
+                "machine": d["machine"], "address": d["address"], "branch": d["branch"], "worktree": d["cwd"],
+                "updated": now, "created": now}
+
+        def apply(x, tid=tid, info=info):
+            x["tasks"][tid].update(info)
+        m.update(apply)
+        text = f"started queued {tid}: {d['agent']} on {d['machine']} ({deps} merged)"
+        m.log("task", "drover", tid, text, task=tid)
+        started.append({**nxt, **info, "fallback": d.get("fallback")})
+    return started
+
+
+MAP_SKIP = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", "target", ".tox",
+            ".mypy_cache", ".pytest_cache", ".next", ".cache", ".idea", ".hg", ".svn"}
+PY_SYM = re.compile(r"^(?:async\s+def|def|class)\s+(\w+)")
+JS_SYM = re.compile(r"^(?:export\s+(?:default\s+)?)?(?:async\s+)?(?:function\*?\s+(\w+)|class\s+(\w+)"
+                    r"|(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|\w+\s*=>))")
+MAP_MAX_BYTES = 1_000_000
+
+
+def file_symbols(path, text):
+    first = text.split("\n", 1)[0]
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".py", ".pyw") or (not ext and first.startswith("#!") and "python" in first):
+        rx, kind = PY_SYM, "py"
+    elif ext in (".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx"):
+        rx, kind = JS_SYM, "js"
+    else:
+        return []
+    out = []
+    for i, line in enumerate(text.split("\n"), 1):
+        m_ = rx.match(line)
+        if m_:
+            name = next(g for g in m_.groups() if g)
+            out.append(f"{'class ' if line.lstrip().startswith(('class', 'export class')) else ''}{name}:{i}")
+    return out
+
+
+def repo_map(root):
+    files = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d_ for d_ in dirnames if d_ not in MAP_SKIP)
+        for fn in sorted(f_ for f_ in filenames if f_ not in MAP_SKIP):
+            full = os.path.join(dirpath, fn)
+            rel = os.path.relpath(full, root)
+            try:
+                if os.path.islink(full) or os.path.getsize(full) > MAP_MAX_BYTES:
+                    continue
+                with open(full, "rb") as fh:
+                    raw = fh.read()
+            except OSError:
+                continue
+            if b"\0" in raw[:4096]:
+                continue
+            text = raw.decode("utf-8", "replace")
+            files.append({"path": rel, "lines": text.count("\n") + (not text.endswith("\n") and bool(text)),
+                          "symbols": file_symbols(rel, text)})
+    return files
+
+
+def cmd_map(a, cfg):
+    root = os.path.abspath(os.path.expanduser(a.repo))
+    if not os.path.isdir(root):
+        die(f"{a.repo}: not a folder")
+    files = repo_map(root)
+    if a.json:
+        print(json.dumps({"repo": root, "files": files}))
+        return
+    for f in files:
+        print(f"{f['path']}  {f['lines']}")
+        syms = f["symbols"]
+        if syms:
+            print("  " + " ".join(syms[:80]) + (f" … +{len(syms) - 80}" if len(syms) > 80 else ""))
+
+
+def cmd_task(a, cfg):
+    m = current_mission(a.mission)
+    data = m.read()
+    if a.action == "add":
+        if not a.title:
+            die("give the task a title")
+        tid = f"t{data['next_task']}"
+        brief = a.brief or a.title
+        after = [x.strip() for x in (a.after or "").split(",") if x.strip()]
+        for dep in after:
+            dt = data["tasks"].get(dep)
+            if not dt:
+                die(f"--after {dep}: no such task in mission {data['id']}")
+            if dt["state"] == "dropped":
+                die(f"--after {dep}: that task was dropped")
+        pref = {"prefer_agent": a.agent, "prefer_model": a.model}
+        if a.model and not a.agent:
+            die("--model needs --agent")
+        files = parse_files(getattr(a, "files", None))
+        for w in check_files(data["repo"], files):
+            print(f"drover: warning: {w}", file=sys.stderr)
+        done_ = [x.strip() for x in (getattr(a, "done", None) or []) if x.strip()]
+        pack = {**({"files": files} if files else {}), **({"done": done_} if done_ else {}),
+                **({"size": a.size} if getattr(a, "size", None) else {})}
+        if after and any(data["tasks"][dep]["state"] != "merged" for dep in after):
+            task = {"id": tid, "title": a.title, "brief": brief, "role": a.role, "state": "queued", "depends_on": after,
+                    "agent": a.agent, "model": a.model, "agent_pref": a.agent, "model_pref": a.model, **pack,
+                    "created": int(time.time()), "updated": int(time.time())}
+
+            def queue(x):
+                x["tasks"][tid] = task
+                x["next_task"] += 1
+            m.update(queue)
+            m.log("task", "coordinator", tid, f"{a.title} (queued after {', '.join(after)})", task=tid)
+            emit(task, a.json, lambda t: f"{t['id']}: queued until {', '.join(after)} are merged")
+            return
+        msg = None  # filled once the branch is known
+
+        branch = f"{BRANCH_PREFIX}{slug(a.title)}-{time.strftime('%m%d%H%M')}"
+        msg = worker_msg(data["id"], {"id": tid, "title": a.title, "brief": brief, **pack}, branch)
+        d = start_agent(cfg, a.role, data["repo"], msg, a.title, branch=branch, name=f"{tid}-{slug(a.title, 20)}",
+                        labels_extra={"drover.mission": data["id"], "drover.task-id": tid},
+                        auto=bool(data.get("auto")), **pref)
+        if not d["agent"]:
+            emit(d, a.json, fmt_route)
+            sys.exit(3)
+        task = {"id": tid, "title": a.title, "brief": brief, "role": a.role, "state": "working", **pack,
+                **({"depends_on": after} if after else {}),
+                **({"agent_pref": a.agent, "model_pref": a.model} if a.agent else {}),
+                "agent": d["agent"], "model": d.get("model"), "family": d["family"], "machine": d["machine"],
+                "address": d["address"], "branch": d["branch"], "worktree": d["cwd"],
+                "created": int(time.time()), "updated": int(time.time())}
+
+        def add(x):
+            x["tasks"][tid] = task
+            x["next_task"] += 1
+        m.update(add)
+        m.log("task", "coordinator", tid, a.title, task=tid)
+        task["fallback"] = d.get("fallback")
+        emit(task, a.json, lambda t: f"{t['id']}: {t['agent']} on {t['machine']}, branch {t['branch']}"
+             + (f"\n  note: {t['fallback']}" if t.get("fallback") else ""))
+        return
+
+    t = data["tasks"].get(a.id)
+    if not t:
+        die(f"no task {a.id} in mission {data['id']}")
+
+    def set_task(**kw):
+        def update(x):
+            current = x["tasks"][a.id]
+            if current["state"] == "dropped" and kw.get("state") != "dropped":
+                die(f"task {a.id} was dropped: {current.get('reason', '')}")
+            current.update({**kw, "updated": int(time.time())})
+        m.update(update)
+
+    if t["state"] == "dropped" and a.action != "drop":
+        die(f"task {a.id} was dropped: {t.get('reason', '')}")
+    if a.action == "drop":
+        if not a.text.strip():
+            die("give a reason for dropping the task")
+        warnings = []
+        queued = t["state"] == "queued"  # never started: no branch, worktree or agent
+        repo = remote_path(cfg, data["repo"], t["machine"]) if not queued else None
+
+        def git(*args):
+            argv = ["git", "-C", repo, *args]
+            if t["machine"] == local_name():
+                r = subprocess.run(argv, capture_output=True, text=True)
+                return r.returncode, r.stdout, r.stderr
+            return remote_sh(hc_target(t["machine"]), shlex.join(argv))
+
+        if queued:
+            unmerged, code = None, 0
+        else:
+            code, out, err = git("rev-list", "--count", f"{data['base']}..{t['branch']}")
+            unmerged = int(out.strip()) if code == 0 else None
+        if unmerged:
+            warnings.append(f"{t['branch']} has {unmerged} commits not in {data['base']}; removing without merging")
+        elif code:
+            warnings.append(f"could not check commits against {data['base']}: {(err or out).strip()}")
+        # Mark dropped before killing agents so late reports cannot revive the task.
+        set_task(state="dropped", reason=a.text)
+        records = [] if queued else [t, *t.get("review_history", []), t.get("review") or {}]
+        for addr in dict.fromkeys(r.get("address") for r in records):
+            if addr:
+                code, out, err = hc(["kill", addr])
+                if code and not GONE.search(err + out):
+                    warnings.append(f"could not kill {addr}: {(err or out).strip()}")
+        for args in (() if queued else (("worktree", "remove", "--force", t["worktree"]), ("branch", "-D", t["branch"]))):
+            code, out, err = git(*args)
+            if code:
+                warnings.append(f"cleanup failed ({shlex.join(args)}): {(err or out).strip()}")
+        m.log("drop", "coordinator", a.id, a.text, task=a.id, unmerged_commits=unmerged, warnings=warnings)
+        for warning in warnings:
+            print(f"drover: warning: {warning}", file=sys.stderr)
+        waiting = [tid for tid, x in m.read()["tasks"].items() if x["state"] == "queued" and a.id in x.get("depends_on", [])]
+        if waiting:
+            note = (f"{a.id} was dropped; queued {', '.join(waiting)} depend on it and stay queued. "
+                    f"Drop them or re-plan (drover task drop <id> \"<reason>\" --mission {data['id']}).")
+            m.log("drop", "drover", "coordinator", note, task=a.id)
+            hc_send(data["coordinator"]["address"], f"[drover] mission {data['id']}: {note}")
+        start_ready_tasks(cfg, m)  # a dropped task frees a slot
+        emit({"task": a.id, "state": "dropped", "reason": a.text, "unmerged_commits": unmerged,
+              "warnings": warnings}, a.json,
+             lambda d: f"{a.id} dropped: {a.text}; " + ("cleanup completed with warnings" if warnings else "nothing to clean up" if queued else "branch and worktree removed")
+             + "".join(f"\n  warning: {w}" for w in warnings))
+        return
+    if a.action == "reroute":
+        role = "reviewer" if a.review else "worker"
+        if a.model and not a.agent:
+            die("--model needs --agent")
+        if t["state"] not in ROLE_TASK_STATES[role]:
+            die(f"{a.id} is {t['state']}; only {'/'.join(ROLE_TASK_STATES[role])} tasks can be rerouted"
+                + ("" if a.review else " (use --review for its review)"))
+        rec = t if role == "worker" else (t.get("review") or {})
+        if not rec.get("address"):
+            die(f"{a.id} has no {role} to move")
+        if a.agent and a.agent == rec.get("agent") and not a.force:
+            die(f"{a.id} is already on {a.agent}")
+        if a.agent and not a.force:
+            why, _ = agent_standing(cfg, a.agent, t["machine"], machine_tools(cfg, t["machine"]))
+            if why:
+                die(f"{a.agent} can't take {a.id} on {t['machine']}: {why} (--force to override)")
+        if not a.agent:  # check first: the old agent is killed before the new one starts
+            probe = route(cfg, "reviewer" if a.review else t.get("role", "worker"), (t["family"],) if a.review else (),
+                          machine=t["machine"], skip_agent=rec.get("agent"))
+            if not probe["agent"]:
+                die(f"no other agent in the chain has capacity on {t['machine']}")
+        new = reroute_task(cfg, m, a.id, role, a.reason or "moved by request", prefer_agent=a.agent,
+                           prefer_model=a.model, force=a.force, manual=True)
+        if not new:
+            die(f"could not move {a.id}: see the log")
+        emit({"task": a.id, "role": role, **new}, a.json,
+             lambda d: f"{d['task']} {role} moved from {rec.get('agent')} to {d['agent']} ({d['address']})")
+        return
+    if a.action == "done":
+        set_task(state="done", summary=a.text)
+        e = m.log("done", a.id, "coordinator", a.text or "done", task=a.id)
+        hc_send(data["coordinator"]["address"], f"[drover] mission {data['id']}: {a.id} done: {e['text']}\nNext: drover task review {a.id} --mission {data['id']}")
+        started = start_ready_tasks(cfg, m)
+        emit({"task": a.id, "state": "done", "started": started}, a.json,
+             lambda d: f"{d['task']} done; the coordinator knows"
+             + "".join(f"\n  started queued {s['id']}: {s['agent']} on {s['machine']}" for s in d["started"]))
+        return
+    if a.action == "review":
+        if a.model and not a.agent:
+            die("--model needs --agent")
+        msg = reviewer_msg(data, t)
+        # The reviewer reads the worktree, so it runs on the worker's machine.
+        started = int(time.time())
+        d = start_agent(cfg, "reviewer", data["repo"], msg, f"review {t['title']}", avoid=(t["family"],),
+                        machine=t["machine"], cwd=t["worktree"], branch=t["branch"], name=f"rev-{a.id}-{slug(t['title'], 16)}",
+                        labels_extra={"drover.mission": data["id"], "drover.task-id": a.id}, auto=bool(data.get("auto")),
+                        prefer_agent=a.agent, prefer_model=a.model)
+        if not d["agent"]:
+            emit(d, a.json, fmt_route)
+            sys.exit(3)
+        history = list(t.get("review_history", []))
+        if t.get("review"):
+            history.append(t["review"])
+        set_task(state="review", review_history=history,
+                 review={"address": d["address"], "agent": d["agent"], "model": d.get("model"),
+                         "family": d["family"], "machine": d["machine"], "verdict": None, "started": started})
+        m.log("review", "coordinator", f"review:{a.id}", f"review {t['branch']}", task=a.id)
+        emit({"task": a.id, "reviewer": d["agent"], "address": d["address"], "fallback": d.get("fallback")}, a.json,
+             lambda x: f"{a.id}: {x['reviewer']} reviews it ({x['address']})"
+             + (f"\n  note: {x['fallback']}" if x.get("fallback") else ""))
+        return
+    if a.action == "verdict":
+        if a.verdict not in ("approve", "changes"):
+            die("verdict is approve or changes")
+        rv = dict(t.get("review") or {})
+        rv["verdict"] = a.verdict
+        set_task(state="approved" if a.verdict == "approve" else "changes", review=rv)
+        e = m.log("verdict", f"review:{a.id}", "coordinator", a.text or a.verdict, task=a.id, verdict=a.verdict)
+        nxt = (f"drover task merge {a.id} --mission {data['id']}" if a.verdict == "approve"
+               else f"drover say {a.id} \"<the fixes>\" --mission {data['id']}")
+        hc_send(data["coordinator"]["address"], f"[drover] mission {data['id']}: review of {a.id}: {a.verdict}\n{e['text']}\nNext: {nxt}")
+        if rv.get("address"):  # the reviewer's job is done
+            hc(["kill", rv["address"]])
+        emit({"task": a.id, "verdict": a.verdict}, a.json, lambda d: f"{d['task']}: {d['verdict']} sent")
+        return
+    if a.action == "merge":
+        repo = data["repo"]
+        if t["machine"] != local_name():
+            die(f"{a.id} is on {t['machine']}; merging work from other machines comes with handoff (not yet)")
+        def try_merge():
+            r = subprocess.run(["git", "-C", repo, "merge", "--no-ff", "--no-edit", "-m",
+                                f"Merge {t['branch']}: {t['title']}", t["branch"]], capture_output=True, text=True)
+            if r.returncode != 0:
+                subprocess.run(["git", "-C", repo, "merge", "--abort"], capture_output=True)
+            return r
+        r = try_merge()
+        if r.returncode != 0:
+            why = (r.stdout + r.stderr).strip()
+            m.log("merge", "coordinator", a.id, f"merge failed: {why[:300]}; trying to auto-resolve", task=a.id, failed=True)
+            ok, detail, files = auto_resolve_merge(cfg, repo, data["base"], t["worktree"], getattr(a, "test_command", None))
+            if ok:
+                r = try_merge()
+                if r.returncode == 0:
+                    m.log("merge", "coordinator", a.id, f"auto-resolved: {detail}", task=a.id)
+            if not ok or r.returncode != 0:
+                if ok:
+                    detail, files = (r.stdout + r.stderr).strip()[:300], []
+                set_task(state="changes")
+                listing = ", ".join(files) if files else "(see detail)"
+                nxt = (f"merge {data['base']} into your branch in your worktree, resolve the conflicts, run the tests, "
+                       f"commit, then: drover task done {a.id} \"<summary>\"")
+                text = (f"[drover] mission {data['id']}: merging {a.id} into {data['base']} conflicts and could not be "
+                        f"auto-resolved: {detail}\nConflicting files: {listing}\nNext: {nxt}")
+                m.log("merge", "coordinator", a.id, f"merge failed, sent back to worker: {detail}", task=a.id, failed=True)
+                for addr in (t.get("address"), data["coordinator"]["address"]):
+                    if addr:
+                        hc_send(addr, text)
+                die(f"merge of {t['branch']} failed (aborted); {a.id} is back in 'changes': {detail}")
+        for addr in (t.get("address"), (t.get("review") or {}).get("address")):
+            if addr:
+                hc(["kill", addr])
+        subprocess.run(["git", "-C", repo, "worktree", "remove", "--force", t["worktree"]], capture_output=True)
+        subprocess.run(["git", "-C", repo, "branch", "-D", t["branch"]], capture_output=True)
+        set_task(state="merged")
+        m.log("merge", "coordinator", a.id, f"merged {t['branch']} into {data['base']}", task=a.id)
+        started = start_ready_tasks(cfg, m)
+        emit({"task": a.id, "merged": t["branch"], "started": started}, a.json,
+             lambda d: f"merged {d['merged']}; branch and worktree removed"
+             + "".join(f"\n  started queued {s['id']}: {s['agent']} on {s['machine']}, branch {s['branch']}" for s in d["started"]))
+
+
+def cmd_say(a, cfg):
+    m = current_mission(a.mission)
+    data = m.read()
+    addr = who(data, a.to)
+    if not addr:
+        die(f"nobody called {a.to!r} in mission {data['id']}")
+    frm = speaker()
+    m.log("say", frm, a.to, a.text)
+    ok, err = hc_send(addr, f"[drover] mission {data['id']}: from {frm}: {a.text}")
+    if not ok:
+        die(f"could not reach {a.to} ({addr}): {err}")
+    emit({"to": a.to, "address": addr}, a.json, lambda d: f"sent to {d['to']}")
+
+
+# ---------------------------------------------------------------- watching
+
+DEAD_STATES = ("exited", "finished", "dead", "closed", "gone", "stopped")
+MAX_REROUTES = 5
+ROLE_TASK_STATES = {"worker": ("working", "changes"), "reviewer": ("review",)}
+
+
+def probe_agent(address, agent, lines=60):
+    """What is this agent's terminal doing? -> {"gone": bool, "status": str, "screen": str},
+    or None when hc cannot say (never read as gone)."""
+    code, out, err = hc(["get", address, "--json"], timeout=20)
+    if code != 0:
+        return {"gone": True, "status": "", "screen": ""} if GONE.search(err + out) else None
+    try:
+        t = json.loads(out)
+        t = t.get("terminal", t)
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    if (t.get("state") or "live") in DEAD_STATES:
+        return {"gone": True, "status": t.get("status") or "", "screen": ""}
+    code, screen, err = hc(["read", address, "--lines", str(lines)], timeout=20)
+    return {"gone": False, "status": t.get("status") or "", "screen": screen if code == 0 else ""}
+
+
+def stuck_reason(cfg, data, status, record, now):
+    """Why a live agent counts as stuck, or None. Only errors, and (auto missions only, since
+    otherwise a blocked agent waits for the person) a long block."""
+    if status == "error":
+        return "its status is error"
+    minutes = cfg.get("missions", {}).get("stuck_minutes", 20)
+    if status == "blocked" and data.get("auto") and minutes:
+        since = record.get("blocked_since")
+        if since and now - since >= minutes * 60:
+            return f"blocked for {int((now - since) // 60)} minutes"
+    return None
+
+
+def agent_standing(cfg, agent, machine, tools=None, out=None, now=None):
+    """(why not, usage): why an agent can't take work on a machine now (out of capacity, not installed,
+    plan window above avoid_above_percent), or None; plus its usage reading when known."""
+    now = time.time() if now is None else now
+    a = cfg["agents"].get(agent)
+    if not a:
+        return "no such agent in settings", None
+    o = (agents_out(now) if out is None else out).get(CAPACITY_ALIASES.get(agent, agent))
+    if o and o.get("machine") in (None, machine):
+        return f"out of capacity until {fmt_until(o['until'], now)} ({o.get('reason')})", None
+    if tools is not None and a["bin"] not in tools:
+        return f"{a['bin']} not installed", None
+    u = usage_probe(agent, hc_target(machine), now) if machine else None
+    avoid_at = (cfg.get("quota") or {}).get("avoid_above_percent") or 0
+    if u and avoid_at and u["used_percent"] >= avoid_at and u["resets_at"] > now:
+        return f"used {u['used_percent']:.0f}% of {u['window']} window, resets {fmt_until(u['resets_at'], now)}", u
+    return None, u
+
+
+def machine_tools(cfg, machine):
+    """The agent binaries installed on a machine, or None when the fleet doesn't say."""
+    try:
+        return next((x.get("tools", []) for x in fleet(cfg)["machines"] if x["name"] == machine), None)
+    except Exception:
+        return None
+
+
+def task_alternatives(cfg, t, role, tools, out, now):
+    """Chain agents with capacity on the task's machine, for a 'Move to...' picker; a reviewer's
+    exclude the worker's family."""
+    rec = t if role == "worker" else (t.get("review") or {})
+    rname = "reviewer" if role == "reviewer" else t.get("role", "worker")
+    rows = []
+    for c in (cfg["roles"].get(rname) or {}).get("chain", []):
+        a = cfg["agents"].get(c["agent"])
+        if not a or c["agent"] == rec.get("agent") or (role == "reviewer" and a["family"] == t.get("family")):
+            continue
+        why, u = agent_standing(cfg, c["agent"], t.get("machine"), tools, out, now)
+        if not why:
+            rows.append({"agent": c["agent"], "model": c.get("model"), "family": a["family"],
+                         "used_percent": u["used_percent"] if u else None, "resets_at": u["resets_at"] if u else None})
+    return rows
+
+
+def reroute_task(cfg, m, tid, role, why, now=None, *, prefer_agent=None, prefer_model=None, force=False, manual=False):
+    """Move a task's worker (or reviewer) to the next choice in the role's chain, on the same
+    machine, branch and worktree. Returns the new record, or None when nothing is left.
+    prefer_agent/prefer_model pick the agent (force: even if out or not installed); manual
+    (the reroute command) also skips the already-reported guard and leaves the current agent out."""
+    now = int(time.time() if now is None else now)
+    data = m.read()
+    t = data["tasks"][tid]
+    rec = t if role == "worker" else (t.get("review") or {})
+    old_addr, old_agent = rec.get("address"), rec.get("agent")
+    tried = rec.get("reroute_failed") or {}
+    out_now = sorted(agents_out())
+    if tried and not manual and tried.get("address") == old_addr and tried.get("out") == out_now:
+        return None  # already reported; nothing changed since
+    if t.get("reroutes", 0) >= MAX_REROUTES:
+        return _reroute_failed(m, data, tid, role, rec, why, out_now, f"{tid} was moved {MAX_REROUTES} times already")
+    if old_addr:
+        hc(["kill", old_addr])
+    note = (f"\n\nNote: a previous agent ({old_agent}) stopped here ({why}). You take over this worktree; "
+            "it may hold uncommitted work, so check `git status` and `git diff` first and build on it.")
+    if role == "worker":
+        brief = worker_msg(data["id"], t, t["branch"]) + note
+        title, name, avoid = t["title"], f"{tid}-{slug(t['title'], 20)}", ()
+    else:
+        brief = reviewer_msg(data, t) + note
+        title, name, avoid = f"review {t['title']}", f"rev-{tid}-{slug(t['title'], 16)}", (t["family"],)
+    try:
+        d = start_agent(cfg, "reviewer" if role == "reviewer" else t.get("role", "worker"), data["repo"], brief, title,
+                        avoid=avoid, machine=t["machine"], cwd=t["worktree"], branch=t["branch"], name=name,
+                        labels_extra={"drover.mission": data["id"], "drover.task-id": tid}, auto=bool(data.get("auto")),
+                        prefer_agent=prefer_agent, prefer_model=prefer_model, prefer_force=force,
+                        skip_agent=old_agent if manual and not prefer_agent else None)
+    except SystemExit:
+        d = {"agent": None}
+    if not d.get("agent"):
+        return _reroute_failed(m, data, tid, role, rec, why, out_now, "no agent is left in the chain")
+    new = {"address": d["address"], "agent": d["agent"], "model": d.get("model"), "family": d["family"]}
+
+    def apply(x):
+        cur = x["tasks"][tid]
+        cur["reroutes"] = cur.get("reroutes", 0) + 1
+        cur["updated"] = now
+        if role == "worker":
+            cur.update(new)
+            cur.pop("blocked_since", None)
+            cur.pop("reroute_failed", None)
+        else:
+            hist = list(cur.get("review_history", []))
+            hist.append(cur.get("review") or {})
+            cur["review_history"] = hist
+            cur["review"] = {**new, "machine": cur["machine"], "verdict": None, "started": now}
+    m.update(apply)
+    text = f"{tid} moved from {old_agent} to {d['agent']} ({why})"
+    m.log("reroute", "drover", "coordinator", text, task=tid, role=role, old=old_addr, new=d["address"])
+    hc_send(data["coordinator"].get("address"), f"[drover] mission {data['id']}: {text}")
+    return new
+
+
+def _reroute_failed(m, data, tid, role, rec, why, out_now, reason):
+    def apply(x):
+        cur = x["tasks"][tid]
+        target = cur if role == "worker" else cur.get("review")
+        if target is not None:
+            target["reroute_failed"] = {"address": rec.get("address"), "out": out_now}
+    m.update(apply)
+    text = f"{tid}: {rec.get('agent')} stopped ({why}) and {reason}; left as is"
+    m.log("reroute", "drover", "coordinator", text, task=tid, role=role, failed=True)
+    hc_send(data["coordinator"].get("address"), f"[drover] mission {data['id']}: {text}")
+    return None
+
+
+def check_mission(cfg, mission_id, now=None):
+    """Look at every active worker and reviewer of a mission; mark out agents that ran out of
+    capacity and move their tasks. Returns the list of what it did."""
+    now = int(time.time() if now is None else now)
+    m = Mission(mission_id)
+    data = m.read()
+    done = []
+    if data.get("state") != "running":
+        return done
+    for tid, t in data.get("tasks", {}).items():
+        for role, states in ROLE_TASK_STATES.items():
+            if t.get("state") not in states:
+                continue
+            rec = t if role == "worker" else (t.get("review") or {})
+            if not rec.get("address") or rec.get("verdict"):
+                continue
+            agent = rec.get("agent") or ""
+            pr = probe_agent(rec["address"], agent)
+            if pr is None:
+                continue
+            why = None
+            hit = None
+            if pr["gone"]:
+                why = "its terminal exited"
+            else:
+                tail = "\n".join([l for l in pr["screen"].splitlines() if l.strip()][-25:])
+                if pr["status"] != "working":  # a working agent may merely mention limits in its output
+                    hit = detect_capacity(agent, tail, now)
+                if hit:
+                    mark_out(agent, hit[0], hit[1])
+                    why = f"{hit[1]} until {fmt_until(hit[0], now)}"
+                else:
+                    if pr["status"] in ("idle", "blocked"):  # out of capacity already: move now, not on the screen text
+                        gone_why = agent_standing(cfg, agent, rec.get("machine") or t.get("machine"), None, None, now)[0]
+                        if gone_why and gone_why.startswith(("out of", "used ")):
+                            why = gone_why
+                    if pr["status"] == "blocked" and not rec.get("blocked_since"):
+                        m.update(lambda x, tid=tid, role=role: (x["tasks"][tid] if role == "worker" else x["tasks"][tid]["review"]).update(blocked_since=now))
+                        rec["blocked_since"] = now
+                    elif pr["status"] != "blocked" and rec.get("blocked_since"):
+                        m.update(lambda x, tid=tid, role=role: (x["tasks"][tid] if role == "worker" else x["tasks"][tid]["review"]).pop("blocked_since", None))
+                    why = why or stuck_reason(cfg, data, pr["status"], rec, now)
+            if why:
+                new = reroute_task(cfg, m, tid, role, why, now)
+                done.append({"task": tid, "role": role, "why": why, "moved": bool(new), "to": (new or {}).get("agent")})
+    return done
+
+
+COORD_WATCH = os.path.join(STATE_DIR, "coordinators.json")
+COORD_MISSES = 2          # consecutive failed checks before a restart
+COORD_MAX_RESTARTS = 3    # per repo per hour
+
+
+def next_step(t):
+    st, rv = t.get("state"), (t.get("review") or {}).get("verdict")
+    if st == "done":
+        return f"{t['id']} done: review it"
+    if st == "review":
+        return f"{t['id']} in review: wait for the verdict"
+    if st == "approved":
+        return f"{t['id']} approved: merge it"
+    if st == "changes":
+        return f"{t['id']} needs changes{' (' + rv + ')' if rv else ''}: its worker is on it"
+    if st == "working":
+        return f"{t['id']} working: wait for it"
+    return None
+
+
+def takeover_digest(m):
+    """Everything a fresh coordinator needs to carry on one mission."""
+    data = m.read()
+    lines = [mission_digest(data)]
+    for t in data.get("tasks", {}).values():
+        if t.get("branch"):
+            lines.append(f"    {t['id']} branch: {t['branch']}")
+    log = [e for e in m.entries() if e.get("text")][-5:]
+    if log:
+        lines.append("    last log:")
+        lines += [f"      {e.get('from')}->{e.get('to')}: {str(e['text'])[:120]}" for e in log]
+    nxt = [n for n in map(next_step, data.get("tasks", {}).values()) if n]
+    lines.append("    next: " + ("; ".join(nxt) if nxt else "plan the tasks, or finish the mission if the goal is met"))
+    return "\n".join(lines)
+
+
+def _coord_state():
+    try:
+        with open(COORD_WATCH) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+PROMPT_MARKERS = ">›→"   # Claude Code, Codex, Cursor
+REPLY_MARKERS = "●•⏺"
+COORD_FINISHED_HOURS = 24
+
+
+def last_person_message(screen):
+    """The person's last unanswered message on a coordinator's screen: the last non-empty user-input
+    block (a line led by a Claude Code '>', Codex '›' or Cursor '→' prompt marker, plus its indented
+    continuation lines). None when an agent reply follows it or there is none."""
+    lines = (screen or "").splitlines()
+    blocks = []  # (index after the block, text)
+    for i, line in enumerate(lines):
+        m = re.match(r"^\s*[│|]?\s*([" + PROMPT_MARKERS + r"])(?:\s(.*))?$", line.rstrip().rstrip("│|").rstrip())
+        if not m:
+            continue
+        text = [(m.group(2) or "").strip()]
+        j = i + 1
+        while j < len(lines) and re.match(r"^\s{2,}\S", lines[j]) and lines[j].lstrip()[0] not in "─━":
+            text.append(lines[j].strip())
+            j += 1
+        blocks.append((j, " ".join(x for x in text if x).strip()))
+    for end, text in reversed(blocks):
+        if not text:
+            continue
+        if any(l.lstrip()[:1] in REPLY_MARKERS for l in lines[end:] if l.strip()):
+            return None
+        return text
+    return None
+
+
+def hand_over_coordinator(cfg, repo, old, why, *, alive=True, agent=None, model=None, force=False, now=None):
+    """Start one new coordinator for a repo (honouring capacity; `agent` first, then the role's chain),
+    brief it with every running mission (else the newest finished one) and the person's last unanswered
+    message, record it on all the repo's missions and kill the old terminal. Returns the new record, or None."""
+    now = int(time.time() if now is None else now)
+    rows = [r for r in mission_rows(repo, cfg) if not r["archived"]]
+    if not rows:
+        die(f"no missions for {tilde(repo)}")
+    ms = [Mission(r["id"]) for r in rows]
+    nd = ms[0].read()
+    digest = [m for m in ms if m.read()["state"] == "running"] or ms[:1]
+    old = old or {}
+    screen = ""
+    if alive and old.get("address"):
+        code, screen, _ = hc(["read", old["address"], "--lines", "80"], timeout=20)
+        screen = screen if code == 0 else ""
+        tail = "\n".join([l for l in screen.splitlines() if l.strip()][-25:])
+        hit = detect_capacity(old.get("agent") or "", tail, now)
+        if hit:
+            mark_out(old.get("agent") or "", hit[0], hit[1])
+    brief = COORDINATOR_BRIEF.format(mid=nd["id"], repo=tilde(repo), goal=nd["goal"], parallel=nd.get("parallel", 3),
+                                     extra=mission_extras(nd))
+    brief += ("\n\nThe previous coordinator stopped (" + why + "). You take over every running mission "
+              "(pass each one's own --mission id). Where each stands:\n" + "\n".join(takeover_digest(m) for m in digest))
+    pending = last_person_message(screen)
+    if pending:
+        brief += ("\n\nThe person's last message to the previous coordinator is still unanswered. Answer it first:\n"
+                  "> " + pending)
+    extra = {"drover.repo": nd["repo"]}
+    if nd.get("space"):
+        extra.update({"herdr.space": nd["space"], "herdr.tab": coordinator_tab(nd["repo"])})
+    try:
+        d = start_agent(cfg, "coordinator", nd["repo"], brief, nd["goal"], labels_extra=extra, auto=bool(nd.get("auto")),
+                        name=f"coord-{slug(os.path.basename(repo), 16)}-{time.strftime('%m%d%H%M')}",
+                        prefer_agent=agent, prefer_model=model, prefer_force=force)
+    except SystemExit:
+        d = {"agent": None}
+    if not d.get("agent"):
+        return None
+    if alive and old.get("address"):
+        hc(["kill", old["address"]])
+    new = {"address": d["address"], "agent": d["agent"], "model": d.get("model"),
+           "family": d["family"], "machine": d["machine"], "started": now}
+    frm = old.get("agent") or old.get("address") or "none"
+    to = d["agent"] + (f"/{d['model']}" if d.get("model") else "")
+    for m in ms:
+        m.update(lambda x: x.update({"coordinator": new}))
+        m.log("mission", "drover", "coordinator", f"coordinator handed over from {frm} to {to} ({why})")
+    return new
+
+
+def check_coordinators(cfg, now=None):
+    """Per repo with running missions (or whose newest mission finished less than a day ago): when the
+    coordinator's terminal is gone (or it is out of capacity) on two consecutive checks, start one new
+    coordinator with a digest of every running mission. A finished mission's coordinator is only replaced
+    when it is out of capacity with a message from the person waiting. At most COORD_MAX_RESTARTS an hour
+    per repo. Inconclusive checks do nothing."""
+    now = int(time.time() if now is None else now)
+    repos = {}
+    for m in running_missions():
+        repos.setdefault(os.path.realpath(m.read()["repo"]), []).append(m)
+    finished, seen = set(), set()
+    for r in mission_rows(cfg=cfg):  # newest first
+        real = os.path.realpath(r["repo"])
+        if real in seen or real in repos:
+            continue
+        seen.add(real)
+        if r["archived"] or r["state"] == "running":
+            continue
+        if now - (Mission(r["id"]).read().get("done_at") or r.get("updated") or 0) < COORD_FINISHED_HOURS * 3600:
+            repos[real] = [Mission(r["id"])]
+            finished.add(real)
+    try:
+        terminals = drover_terminals(strict=True)
+    except Inconclusive:
+        return []
+    state, done = _coord_state(), []
+    for repo, ms in repos.items():
+        datas = [m.read() for m in ms]
+        coord = next((x["coordinator"] for x in datas if (x.get("coordinator") or {}).get("address")), None)
+        if not coord:
+            continue
+        st = state.setdefault(repo, {"misses": 0, "restarts": []})
+        st["restarts"] = [t for t in st.get("restarts", []) if now - t < 3600]
+        t = next((t for t in terminals if same_address(t.get("address"), coord["address"])), None)
+        why = None
+        if t is None or (t.get("state") or "live") in DEAD_STATES:
+            if repo not in finished:
+                why = "its terminal exited"
+        elif t.get("status") != "working":
+            code, screen, _ = hc(["read", coord["address"], "--lines", "60"], timeout=20)
+            screen = screen if code == 0 else ""
+            tail = "\n".join([l for l in screen.splitlines() if l.strip()][-25:])
+            hit = detect_capacity(coord.get("agent") or "", tail, now)
+            if hit and (repo not in finished or last_person_message(screen)):
+                why = f"{hit[1]} until {fmt_until(hit[0], now)}"
+        if not why:
+            st["misses"] = 0
+            continue
+        st["misses"] = st.get("misses", 0) + 1
+        if st["misses"] < COORD_MISSES:
+            continue
+        if len(st["restarts"]) >= COORD_MAX_RESTARTS:
+            if not st.get("limit_logged"):
+                st["limit_logged"] = True
+                for m in ms:
+                    m.log("mission", "drover", "person", f"coordinator is gone ({why}) and was restarted "
+                          f"{COORD_MAX_RESTARTS} times in the last hour; not restarting again, start one yourself")
+                done.append({"repo": repo, "restarted": False, "why": "restart limit"})
+            continue
+        new = hand_over_coordinator(cfg, repo, coord, why, alive=t is not None, now=now)
+        st["restarts"].append(now)
+        st["misses"] = 0
+        st.pop("limit_logged", None)
+        if not new:
+            done.append({"repo": repo, "restarted": False, "why": "no agent available"})
+            continue
+        done.append({"repo": repo, "restarted": True, "why": why, "to": new["address"]})
+    write_json(COORD_WATCH, state)
+    return done
+
+
+def cmd_watch(a, cfg):
+    idle = 0
+    while True:
+        try:
+            missions = [Mission(a.mission)] if a.mission else running_missions()
+            results = {}
+            if not a.mission:
+                restarted = check_coordinators(cfg)
+                if restarted:
+                    results["coordinators"] = restarted
+            for m in missions:
+                acts = check_mission(cfg, m.read()["id"])
+                if acts:
+                    results[m.read()["id"]] = acts
+            if results and not a.json:
+                print(json.dumps(results), flush=True)
+            idle = 0 if missions else idle + 1
+        except Exception as e:  # one bad pass must not end the watcher
+            print(f"drover watch: {e}", file=sys.stderr, flush=True)
+        if a.once:
+            emit({"checked": [m.read()["id"] for m in missions], "actions": results}, a.json, lambda d: json.dumps(d["actions"]) if d["actions"] else "nothing to do")
+            return
+        if idle * a.interval >= 600:  # no running missions for 10 minutes; mission start launches a new one
+            return
+        time.sleep(a.interval)
+
+
+def ensure_watcher(cfg):
+    """One watcher per machine that holds mission state: a kept hc terminal labelled
+    drover.role=watcher, started once (idempotent). Failures only warn."""
+    try:
+        for t in drover_terminals(strict=True):
+            if labels(t).get("drover.role") == "watcher" and machine_of(t["address"]) == local_name() \
+                    and (t.get("state") or "live") not in DEAD_STATES:
+                return t["address"]
+        args = ["run", "--bg", "--json", "--cwd", HOME, "--name", "drover-watcher", "--keep",
+                "--label", "drover.role=watcher"]
+        if not os.environ.get("HC_TERMINAL_ID"):
+            args.append("--no-parent")
+        code, out, err = hc([*args, "--", sys.executable, os.path.abspath(__file__), "watch"], timeout=60)
+        if code != 0:
+            raise RuntimeError(err.strip() or out.strip())
+        return "started"
+    except (Inconclusive, RuntimeError, OSError) as e:
+        print(f"drover: warning: could not start the watcher ({e}); run `drover watch` yourself", file=sys.stderr)
+
+
+def cmd_coordinator(a, cfg):
+    repo = os.path.realpath(os.path.expanduser(a.repo))
+    rows = [r for r in mission_rows(repo, cfg) if not r["archived"]]
+    if not rows:
+        die(f"no missions for {tilde(repo)}")
+    recs = [Mission(r["id"]).read() for r in rows]  # newest first; running ones win
+    recs = [x for x in recs if x["state"] == "running"] + [x for x in recs if x["state"] != "running"]
+    old = next((x["coordinator"] for x in recs if (x.get("coordinator") or {}).get("address")), None)
+    if a.action == "show":
+        if not old:
+            die(f"{tilde(repo)} has no coordinator recorded")
+        emit(old, a.json, lambda c: f"{c['address']}: {c.get('agent')}" + (f"/{c['model']}" if c.get("model") else "")
+             + f" on {c.get('machine')}")
+        return
+    if a.model and not a.agent:
+        die("--model needs --agent")
+    alive = False
+    if old and old.get("address"):
+        code, out, _ = hc(["get", old["address"], "--json"], timeout=20)
+        try:
+            t = json.loads(out) if code == 0 else {}
+            alive = bool(t) and (t.get("terminal", t).get("state") or "live") not in DEAD_STATES
+        except (json.JSONDecodeError, AttributeError):
+            alive = False
+    new = hand_over_coordinator(cfg, repo, old, a.reason or "replaced by request", alive=alive,
+                                agent=a.agent, model=a.model, force=a.force)
+    if not new:
+        die("no agent available for a new coordinator", code=3)
+    emit(new, a.json, lambda c: f"new coordinator {c['address']} ({c['agent']}) for {tilde(repo)}")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="drover", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--version", action="version", version=f"drover {VERSION}")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def add(name, fn, help_):
+        s = sub.add_parser(name, help=help_)
+        s.add_argument("--json", action="store_true", default=not sys.stdout.isatty())
+        s.add_argument("--text", dest="json", action="store_false", help="text even when piped")
+        s.set_defaults(fn=fn)
+        return s
+
+    s = add("config", cmd_config, "show, create or replace the settings")
+    s.add_argument("--init", action="store_true")
+    s.add_argument("--set-json", metavar="JSON")
+    add("probe", cmd_probe, "ask every machine what it can do now")
+    s = add("status", cmd_status, "machines and drover agents")
+    s.add_argument("--max-age", type=int, default=PROBE_MAX_AGE)
+    s = add("dashboard", cmd_dashboard, "project mission dashboard, live agents and token usage")
+    s.set_defaults(json=False)
+    s.add_argument("--repo", default=".")
+    s.add_argument("--mission", help="which mission (default: newest running, else newest non-archived)")
+    s.add_argument("--all", action="store_true", help="include archived missions")
+    for name, fn, help_ in (("route", cmd_route, "where and with what a role would start"),
+                            ("run", cmd_run, "start a role on the best machine")):
+        s = add(name, fn, help_)
+        s.add_argument("role")
+        s.add_argument("--machine", help="only consider this machine")
+        s.add_argument("--avoid-family", action="append", help="for reviewers: the author's model family")
+        if name == "run":
+            s.add_argument("--repo", required=True, help="the project folder (as on this machine)")
+            s.add_argument("--name")
+            s.add_argument("--dry-run", action="store_true")
+            s.add_argument("task")
+    s = add("project", cmd_project, "list, add, create, open or forget projects")
+    s.add_argument("action", choices=["list", "add", "new", "open", "forget"])
+    s.add_argument("target", nargs="?", default="", help="add: a folder; new: a name; open/forget: a project name")
+    s.add_argument("--name", help="add: the project's name (default: the folder's)")
+    s.add_argument("--dir", default="~/Work", help="new: where to make it")
+    s.add_argument("--clone", metavar="URL", help="new: clone this instead of starting empty")
+    s.add_argument("--github", choices=["none", "private", "public"], default="none",
+                   help="new: also make a GitHub repo (needs gh)")
+    s = add("mission", cmd_mission, "start, list, show, stop, finish or archive missions")
+    s.add_argument("action", choices=["start", "list", "show", "stop", "done", "archive", "unarchive"])
+    s.add_argument("goal", nargs="?", default="", help="start: goal; done: summary; archive/unarchive: mission id")
+    s.add_argument("--repo", default=".")
+    s.add_argument("--space", help="start: the Herdr space to show the coordinator in")
+    s.add_argument("--auto", action="store_true",
+                   help="start: run the mission's agents unattended (their CLI's autonomy flags)")
+    s.add_argument("--image", action="append", metavar="PATH", help="start: attach an image for the coordinator (repeatable)")
+    s.add_argument("--parallel", type=int, default=3, help="start: tasks at once")
+    s.add_argument("--mission", help="show/stop/done: which (default: yours, else the latest)")
+    s.add_argument("--log", type=int, default=50, help="show: log entries to include")
+    s.add_argument("--all", action="store_true", help="list: include archived missions")
+    s.add_argument("--force", action="store_true", help="done: finish despite active tasks")
+    s = add("task", cmd_task, "mission tasks: add, done, review, verdict, merge, drop, reroute")
+    s.add_argument("action", choices=["add", "done", "review", "verdict", "merge", "drop", "reroute"])
+    s.add_argument("id", nargs="?", default="", help="add: the title; others: the task id")
+    s.add_argument("rest", nargs="*", help="done: summary; drop: reason; verdict: approve|changes and notes")
+    s.add_argument("--brief", help="add: what the worker should do")
+    s.add_argument("--role", default="worker", help="add: worker or mechanical")
+    s.add_argument("--agent", help="add/review: try this agent first (falls back to the role chain); reroute: move to it")
+    s.add_argument("--model", help="add/review/reroute: model for --agent")
+    s.add_argument("--reason", help="reroute: why (default: moved by request)")
+    s.add_argument("--review", action="store_true", help="reroute: move the active review, not the worker")
+    s.add_argument("--force", action="store_true", help="reroute: take --agent even if out of capacity or not installed")
+    s.add_argument("--after", help="add: queue until these tasks are merged (t1 or t1,t2)")
+    s.add_argument("--files", help="add: what to read first, 'path:10-40,other/path' (ranges optional)")
+    s.add_argument("--done", action="append", help="add: done criteria (repeatable)")
+    s.add_argument("--size", choices=["S", "M", "L"], help="add: expected size")
+    s.add_argument("--mission")
+    s = add("map", cmd_map, "compact outline of a repo: files, line counts, top-level functions and classes")
+    s.set_defaults(json=False)
+    s.add_argument("--repo", default=".")
+    s = add("agent", cmd_agent, "list, set or clear which agent CLIs are out of capacity")
+    s.add_argument("action", choices=["list", "out", "clear"], nargs="?", default="list")
+    s.add_argument("agent", nargs="?", default="")
+    s.add_argument("--until", help="out: a duration (2h30m) or ISO time; default 1h")
+    s.add_argument("--reason", help="out: why")
+    s.add_argument("--machine", help="out: only on this machine")
+    s = add("coordinator", cmd_coordinator, "show or replace a project's coordinator")
+    s.add_argument("action", choices=["show", "replace"])
+    s.add_argument("--repo", default=".")
+    s.add_argument("--agent", help="replace: start this agent (falls back to the coordinator chain)")
+    s.add_argument("--model", help="replace: model for --agent")
+    s.add_argument("--force", action="store_true", help="replace: take --agent even if out of capacity")
+    s.add_argument("--reason", help="replace: why (default: replaced by request)")
+    s = add("say", cmd_say, "message another agent in the mission (logged for the view)")
+    s.add_argument("to", help="coordinator, a task id, review:<task id>, or an hc address")
+    s.add_argument("text")
+    s.add_argument("--mission")
+    s = add("peek", cmd_peek, "the tail of an agent's terminal")
+    s.add_argument("who", help="coordinator, a task id, review:<task id>, or an hc address")
+    s.add_argument("--lines", type=int, default=30)
+    s.add_argument("--mission")
+    s = add("watch", cmd_watch, "notice out-of-capacity or stuck agents and move their tasks to the next choice")
+    s.add_argument("--mission", help="only this mission (default: all running)")
+    s.add_argument("--once", action="store_true")
+    s.add_argument("--interval", type=int, default=60)
+    s = add("cleanup", cmd_cleanup, "remove merged drover/* branches and their worktrees")
+    s.add_argument("--repo", default=".")
+    s.add_argument("--machine")
+    s.add_argument("--yes", action="store_true", help="really remove (default: show what would go)")
+
+    a = p.parse_args()
+    if a.cmd == "task":  # positional shapes differ per action
+        if a.action == "add":
+            a.title, a.text = " ".join([a.id, *a.rest]).strip(), ""
+        elif a.action == "verdict":
+            a.verdict = a.rest[0] if a.rest else ""
+            a.text = " ".join(a.rest[1:])
+        else:
+            a.text = " ".join(a.rest)
+    a.fn(a, load_config())
+
+
+if __name__ == "__main__":
+    main()
