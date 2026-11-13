@@ -1,80 +1,501 @@
 <!doctype html>
 <meta charset="utf-8"><title>Pasture sprites</title>
-<style>body{background:#5e9e43;font:12px monospace;color:#fff;margin:16px}.g{display:flex;flex-wrap:wrap;gap:14px}figure{margin:0}.s{background:#8fd0f0;padding:6px;display:inline-block}img{image-rendering:pixelated;display:block}small{opacity:.7}</style>
+<style>body{background:#7cbf56;font:12px monospace;color:#1f2a16;margin:16px}
+h2{font-size:13px;margin:18px 0 6px}
+.g{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end}
+figure{margin:0}figcaption{font-size:10px}
+.s{padding:4px;display:inline-block}.grass .s{background:#7cbf56}
+.sky .s{background:#9fd8f2}
+img,.a{image-rendering:pixelated;display:block}
+.a{background-size:100% 100%}
+.lane{position:relative;width:420px;background:#86c65e}
+.lane .a{position:relative;animation-iteration-count:infinite}
+@keyframes walk{from{left:0}to{left:calc(100% - var(--w))}}
+#night{position:fixed;inset:0;background:rgba(24,34,92,.5);pointer-events:none;display:none}
+body.night #night{display:block}
+body.night{color:#dde4ff}
+@keyframes a0{0%{background-image:url(sheep2-anthropic-walk1.svg)}25%{background-image:url(sheep2-anthropic-walk2.svg)}50%{background-image:url(sheep2-anthropic-walk3.svg)}75%{background-image:url(sheep2-anthropic-walk4.svg)}}
+@keyframes a1{0%{background-image:url(sheep2-openai-walk1.svg)}25%{background-image:url(sheep2-openai-walk2.svg)}50%{background-image:url(sheep2-openai-walk3.svg)}75%{background-image:url(sheep2-openai-walk4.svg)}}
+@keyframes a2{0%{background-image:url(sheep2-cursor-walk1.svg)}25%{background-image:url(sheep2-cursor-walk2.svg)}50%{background-image:url(sheep2-cursor-walk3.svg)}75%{background-image:url(sheep2-cursor-walk4.svg)}}
+@keyframes a3{0%{background-image:url(sheep2-github-walk1.svg)}25%{background-image:url(sheep2-github-walk2.svg)}50%{background-image:url(sheep2-github-walk3.svg)}75%{background-image:url(sheep2-github-walk4.svg)}}
+@keyframes a4{0%{background-image:url(sheep2-google-walk1.svg)}25%{background-image:url(sheep2-google-walk2.svg)}50%{background-image:url(sheep2-google-walk3.svg)}75%{background-image:url(sheep2-google-walk4.svg)}}
+@keyframes a5{0%{background-image:url(sheep2-other-walk1.svg)}25%{background-image:url(sheep2-other-walk2.svg)}50%{background-image:url(sheep2-other-walk3.svg)}75%{background-image:url(sheep2-other-walk4.svg)}}
+@keyframes a6{0%{background-image:url(sheep2-lamb-walk1.svg)}50%{background-image:url(sheep2-lamb-walk2.svg)}}
+@keyframes a7{0%{background-image:url(drover2-anthropic-walk1.svg)}25%{background-image:url(drover2-anthropic-walk2.svg)}50%{background-image:url(drover2-anthropic-walk3.svg)}75%{background-image:url(drover2-anthropic-walk4.svg)}}
+@keyframes a8{0%{background-image:url(drover2-openai-walk1.svg)}25%{background-image:url(drover2-openai-walk2.svg)}50%{background-image:url(drover2-openai-walk3.svg)}75%{background-image:url(drover2-openai-walk4.svg)}}
+@keyframes a9{0%{background-image:url(drover2-cursor-walk1.svg)}25%{background-image:url(drover2-cursor-walk2.svg)}50%{background-image:url(drover2-cursor-walk3.svg)}75%{background-image:url(drover2-cursor-walk4.svg)}}
+@keyframes a10{0%{background-image:url(drover2-github-walk1.svg)}25%{background-image:url(drover2-github-walk2.svg)}50%{background-image:url(drover2-github-walk3.svg)}75%{background-image:url(drover2-github-walk4.svg)}}
+@keyframes a11{0%{background-image:url(drover2-google-walk1.svg)}25%{background-image:url(drover2-google-walk2.svg)}50%{background-image:url(drover2-google-walk3.svg)}75%{background-image:url(drover2-google-walk4.svg)}}
+@keyframes a12{0%{background-image:url(drover2-other-walk1.svg)}25%{background-image:url(drover2-other-walk2.svg)}50%{background-image:url(drover2-other-walk3.svg)}75%{background-image:url(drover2-other-walk4.svg)}}
+@keyframes a13{0%{background-image:url(drover2-anthropic-idle1.svg)}50%{background-image:url(drover2-anthropic-idle2.svg)}}
+@keyframes a14{0%{background-image:url(dog2-run1.svg)}25%{background-image:url(dog2-run2.svg)}50%{background-image:url(dog2-run3.svg)}75%{background-image:url(dog2-run4.svg)}}
+@keyframes a15{0%{background-image:url(dog2-wag1.svg)}50%{background-image:url(dog2-wag2.svg)}}
+@keyframes a16{0%{background-image:url(owl-fly1.svg)}25%{background-image:url(owl-fly2.svg)}50%{background-image:url(owl-fly3.svg)}75%{background-image:url(owl-fly4.svg)}}
+@keyframes a17{0%{background-image:url(sheep2-google-graze1.svg)}50%{background-image:url(sheep2-google-graze2.svg)}}
+@keyframes a18{0%{background-image:url(smoke1.svg)}33.3333%{background-image:url(smoke2.svg)}66.6667%{background-image:url(smoke3.svg)}}
+@keyframes a19{0%{background-image:url(rain1.svg)}50%{background-image:url(rain2.svg)}}
+@keyframes a20{0%{background-image:url(confetti1.svg)}50%{background-image:url(confetti2.svg)}}
+@keyframes a21{0%{background-image:url(sparkle1.svg)}50%{background-image:url(sparkle2.svg)}}</style>
+<body>
+<p>4x pixelated. <a href="#day" onclick="location.hash='day';location.reload()">day</a> / <a href="#night" onclick="location.hash='night';location.reload()">night</a> (night = translucent blue overlay, as in the mod)</p>
+<h2>Animated</h2>
 <div class="g">
-<figure><div class="s"><img src="sheep-anthropic-walk1.svg" width="64" height="64"></div><figcaption>sheep-anthropic-walk1 <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-anthropic-walk1-l.svg" width="64" height="64"></div><figcaption>sheep-anthropic-walk1-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-anthropic-walk2.svg" width="64" height="64"></div><figcaption>sheep-anthropic-walk2 <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-anthropic-walk2-l.svg" width="64" height="64"></div><figcaption>sheep-anthropic-walk2-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-anthropic-sit.svg" width="64" height="64"></div><figcaption>sheep-anthropic-sit <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-anthropic-sit-l.svg" width="64" height="64"></div><figcaption>sheep-anthropic-sit-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-anthropic-sleep.svg" width="64" height="64"></div><figcaption>sheep-anthropic-sleep <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-anthropic-sleep-l.svg" width="64" height="64"></div><figcaption>sheep-anthropic-sleep-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-anthropic-graze.svg" width="64" height="64"></div><figcaption>sheep-anthropic-graze <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-anthropic-graze-l.svg" width="64" height="64"></div><figcaption>sheep-anthropic-graze-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-anthropic-alert.svg" width="64" height="64"></div><figcaption>sheep-anthropic-alert <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-anthropic-alert-l.svg" width="64" height="64"></div><figcaption>sheep-anthropic-alert-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-openai-walk1.svg" width="64" height="64"></div><figcaption>sheep-openai-walk1 <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-openai-walk1-l.svg" width="64" height="64"></div><figcaption>sheep-openai-walk1-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-openai-walk2.svg" width="64" height="64"></div><figcaption>sheep-openai-walk2 <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-openai-walk2-l.svg" width="64" height="64"></div><figcaption>sheep-openai-walk2-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-openai-sit.svg" width="64" height="64"></div><figcaption>sheep-openai-sit <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-openai-sit-l.svg" width="64" height="64"></div><figcaption>sheep-openai-sit-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-openai-sleep.svg" width="64" height="64"></div><figcaption>sheep-openai-sleep <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-openai-sleep-l.svg" width="64" height="64"></div><figcaption>sheep-openai-sleep-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-openai-graze.svg" width="64" height="64"></div><figcaption>sheep-openai-graze <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-openai-graze-l.svg" width="64" height="64"></div><figcaption>sheep-openai-graze-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-openai-alert.svg" width="64" height="64"></div><figcaption>sheep-openai-alert <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-openai-alert-l.svg" width="64" height="64"></div><figcaption>sheep-openai-alert-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-cursor-walk1.svg" width="64" height="64"></div><figcaption>sheep-cursor-walk1 <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-cursor-walk1-l.svg" width="64" height="64"></div><figcaption>sheep-cursor-walk1-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-cursor-walk2.svg" width="64" height="64"></div><figcaption>sheep-cursor-walk2 <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-cursor-walk2-l.svg" width="64" height="64"></div><figcaption>sheep-cursor-walk2-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-cursor-sit.svg" width="64" height="64"></div><figcaption>sheep-cursor-sit <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-cursor-sit-l.svg" width="64" height="64"></div><figcaption>sheep-cursor-sit-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-cursor-sleep.svg" width="64" height="64"></div><figcaption>sheep-cursor-sleep <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-cursor-sleep-l.svg" width="64" height="64"></div><figcaption>sheep-cursor-sleep-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-cursor-graze.svg" width="64" height="64"></div><figcaption>sheep-cursor-graze <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-cursor-graze-l.svg" width="64" height="64"></div><figcaption>sheep-cursor-graze-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-cursor-alert.svg" width="64" height="64"></div><figcaption>sheep-cursor-alert <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-cursor-alert-l.svg" width="64" height="64"></div><figcaption>sheep-cursor-alert-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-github-walk1.svg" width="64" height="64"></div><figcaption>sheep-github-walk1 <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-github-walk1-l.svg" width="64" height="64"></div><figcaption>sheep-github-walk1-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-github-walk2.svg" width="64" height="64"></div><figcaption>sheep-github-walk2 <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-github-walk2-l.svg" width="64" height="64"></div><figcaption>sheep-github-walk2-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-github-sit.svg" width="64" height="64"></div><figcaption>sheep-github-sit <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-github-sit-l.svg" width="64" height="64"></div><figcaption>sheep-github-sit-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-github-sleep.svg" width="64" height="64"></div><figcaption>sheep-github-sleep <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-github-sleep-l.svg" width="64" height="64"></div><figcaption>sheep-github-sleep-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-github-graze.svg" width="64" height="64"></div><figcaption>sheep-github-graze <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-github-graze-l.svg" width="64" height="64"></div><figcaption>sheep-github-graze-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-github-alert.svg" width="64" height="64"></div><figcaption>sheep-github-alert <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-github-alert-l.svg" width="64" height="64"></div><figcaption>sheep-github-alert-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-other-walk1.svg" width="64" height="64"></div><figcaption>sheep-other-walk1 <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-other-walk1-l.svg" width="64" height="64"></div><figcaption>sheep-other-walk1-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-other-walk2.svg" width="64" height="64"></div><figcaption>sheep-other-walk2 <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-other-walk2-l.svg" width="64" height="64"></div><figcaption>sheep-other-walk2-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-other-sit.svg" width="64" height="64"></div><figcaption>sheep-other-sit <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-other-sit-l.svg" width="64" height="64"></div><figcaption>sheep-other-sit-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-other-sleep.svg" width="64" height="64"></div><figcaption>sheep-other-sleep <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-other-sleep-l.svg" width="64" height="64"></div><figcaption>sheep-other-sleep-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-other-graze.svg" width="64" height="64"></div><figcaption>sheep-other-graze <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-other-graze-l.svg" width="64" height="64"></div><figcaption>sheep-other-graze-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-other-alert.svg" width="64" height="64"></div><figcaption>sheep-other-alert <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="sheep-other-alert-l.svg" width="64" height="64"></div><figcaption>sheep-other-alert-l <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="drover-1.svg" width="64" height="96"></div><figcaption>drover-1 <small>16x24</small></figcaption></figure>
-<figure><div class="s"><img src="dog-1.svg" width="64" height="48"></div><figcaption>dog-1 <small>16x12</small></figcaption></figure>
-<figure><div class="s"><img src="drover-2.svg" width="64" height="96"></div><figcaption>drover-2 <small>16x24</small></figcaption></figure>
-<figure><div class="s"><img src="dog-2.svg" width="64" height="48"></div><figcaption>dog-2 <small>16x12</small></figcaption></figure>
-<figure><div class="s"><img src="barn.svg" width="192" height="160"></div><figcaption>barn <small>48x40</small></figcaption></figure>
-<figure><div class="s"><img src="fence.svg" width="64" height="64"></div><figcaption>fence <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="gate-open.svg" width="64" height="64"></div><figcaption>gate-open <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="gate-closed.svg" width="64" height="64"></div><figcaption>gate-closed <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="grass-1.svg" width="32" height="32"></div><figcaption>grass-1 <small>8x8</small></figcaption></figure>
-<figure><div class="s"><img src="grass-2.svg" width="32" height="32"></div><figcaption>grass-2 <small>8x8</small></figcaption></figure>
-<figure><div class="s"><img src="flower.svg" width="32" height="32"></div><figcaption>flower <small>8x8</small></figcaption></figure>
-<figure><div class="s"><img src="sun.svg" width="64" height="64"></div><figcaption>sun <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="cloud.svg" width="64" height="64"></div><figcaption>cloud <small>16x16</small></figcaption></figure>
-<figure><div class="s"><img src="bubble-alert.svg" width="32" height="32"></div><figcaption>bubble-alert <small>8x8</small></figcaption></figure>
-<figure><div class="s"><img src="zzz.svg" width="32" height="32"></div><figcaption>zzz <small>8x8</small></figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:104px;height:104px;--w:104px;background-image:url(sheep2-anthropic-walk1.svg);animation:a0 600ms steps(1) infinite,walk 4800ms linear infinite alternate"></div></div><figcaption>sheep2-anthropic walk</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:104px;height:104px;--w:104px;background-image:url(sheep2-openai-walk1.svg);animation:a1 600ms steps(1) infinite,walk 4800ms linear infinite alternate"></div></div><figcaption>sheep2-openai walk</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:104px;height:104px;--w:104px;background-image:url(sheep2-cursor-walk1.svg);animation:a2 600ms steps(1) infinite,walk 4800ms linear infinite alternate"></div></div><figcaption>sheep2-cursor walk</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:104px;height:104px;--w:104px;background-image:url(sheep2-github-walk1.svg);animation:a3 600ms steps(1) infinite,walk 4800ms linear infinite alternate"></div></div><figcaption>sheep2-github walk</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:104px;height:104px;--w:104px;background-image:url(sheep2-google-walk1.svg);animation:a4 600ms steps(1) infinite,walk 4800ms linear infinite alternate"></div></div><figcaption>sheep2-google walk</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:104px;height:104px;--w:104px;background-image:url(sheep2-other-walk1.svg);animation:a5 600ms steps(1) infinite,walk 4800ms linear infinite alternate"></div></div><figcaption>sheep2-other walk</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:72px;height:72px;--w:72px;background-image:url(sheep2-lamb-walk1.svg);animation:a6 300ms steps(1) infinite,walk 2400ms linear infinite alternate"></div></div><figcaption>lamb walk</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:104px;height:136px;--w:104px;background-image:url(drover2-anthropic-walk1.svg);animation:a7 700ms steps(1) infinite,walk 5600ms linear infinite alternate"></div></div><figcaption>drover2-anthropic walk</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:104px;height:136px;--w:104px;background-image:url(drover2-openai-walk1.svg);animation:a8 700ms steps(1) infinite,walk 5600ms linear infinite alternate"></div></div><figcaption>drover2-openai walk</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:104px;height:136px;--w:104px;background-image:url(drover2-cursor-walk1.svg);animation:a9 700ms steps(1) infinite,walk 5600ms linear infinite alternate"></div></div><figcaption>drover2-cursor walk</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:104px;height:136px;--w:104px;background-image:url(drover2-github-walk1.svg);animation:a10 700ms steps(1) infinite,walk 5600ms linear infinite alternate"></div></div><figcaption>drover2-github walk</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:104px;height:136px;--w:104px;background-image:url(drover2-google-walk1.svg);animation:a11 700ms steps(1) infinite,walk 5600ms linear infinite alternate"></div></div><figcaption>drover2-google walk</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:104px;height:136px;--w:104px;background-image:url(drover2-other-walk1.svg);animation:a12 700ms steps(1) infinite,walk 5600ms linear infinite alternate"></div></div><figcaption>drover2-other walk</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:104px;height:136px;--w:104px;background-image:url(drover2-anthropic-idle1.svg);animation:a13 1200ms steps(1) infinite"></div></div><figcaption>drover2 idle</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:104px;height:80px;--w:104px;background-image:url(dog2-run1.svg);animation:a14 400ms steps(1) infinite,walk 3200ms linear infinite alternate"></div></div><figcaption>dog2 run</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:104px;height:80px;--w:104px;background-image:url(dog2-wag1.svg);animation:a15 300ms steps(1) infinite"></div></div><figcaption>dog2 wag</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:72px;height:72px;--w:72px;background-image:url(owl-fly1.svg);animation:a16 500ms steps(1) infinite,walk 4000ms linear infinite alternate"></div></div><figcaption>owl fly</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:104px;height:104px;--w:104px;background-image:url(sheep2-google-graze1.svg);animation:a17 800ms steps(1) infinite"></div></div><figcaption>sheep2 graze</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:40px;height:56px;--w:40px;background-image:url(smoke1.svg);animation:a18 900ms steps(1) infinite"></div></div><figcaption>smoke</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:72px;height:72px;--w:72px;background-image:url(rain1.svg);animation:a19 300ms steps(1) infinite"></div></div><figcaption>rain</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:40px;height:40px;--w:40px;background-image:url(confetti1.svg);animation:a20 300ms steps(1) infinite"></div></div><figcaption>confetti</figcaption></figure>
+<figure><div class="lane"><div class="a" style="width:40px;height:40px;--w:40px;background-image:url(sparkle1.svg);animation:a21 400ms steps(1) infinite"></div></div><figcaption>sparkle</figcaption></figure>
 </div>
+<h2>Sheep: anthropic</h2><div class="g grass">
+<figure><div class="s"><img src="sheep2-anthropic-walk1.svg" width="104" height="104"></div><figcaption>sheep2-anthropic-walk1 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-anthropic-walk1-l.svg" width="104" height="104"></div><figcaption>sheep2-anthropic-walk1-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-anthropic-walk2.svg" width="104" height="104"></div><figcaption>sheep2-anthropic-walk2 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-anthropic-walk2-l.svg" width="104" height="104"></div><figcaption>sheep2-anthropic-walk2-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-anthropic-walk3.svg" width="104" height="104"></div><figcaption>sheep2-anthropic-walk3 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-anthropic-walk3-l.svg" width="104" height="104"></div><figcaption>sheep2-anthropic-walk3-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-anthropic-walk4.svg" width="104" height="104"></div><figcaption>sheep2-anthropic-walk4 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-anthropic-walk4-l.svg" width="104" height="104"></div><figcaption>sheep2-anthropic-walk4-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-anthropic-graze1.svg" width="104" height="104"></div><figcaption>sheep2-anthropic-graze1 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-anthropic-graze1-l.svg" width="104" height="104"></div><figcaption>sheep2-anthropic-graze1-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-anthropic-graze2.svg" width="104" height="104"></div><figcaption>sheep2-anthropic-graze2 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-anthropic-graze2-l.svg" width="104" height="104"></div><figcaption>sheep2-anthropic-graze2-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-anthropic-sit.svg" width="104" height="104"></div><figcaption>sheep2-anthropic-sit <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-anthropic-sit-l.svg" width="104" height="104"></div><figcaption>sheep2-anthropic-sit-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-anthropic-sleep.svg" width="104" height="104"></div><figcaption>sheep2-anthropic-sleep <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-anthropic-sleep-l.svg" width="104" height="104"></div><figcaption>sheep2-anthropic-sleep-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-anthropic-alert.svg" width="104" height="104"></div><figcaption>sheep2-anthropic-alert <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-anthropic-alert-l.svg" width="104" height="104"></div><figcaption>sheep2-anthropic-alert-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-anthropic-stuck.svg" width="104" height="104"></div><figcaption>sheep2-anthropic-stuck <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-anthropic-stuck-l.svg" width="104" height="104"></div><figcaption>sheep2-anthropic-stuck-l <small>24x24</small></figcaption></figure>
+</div>
+<h2>Sheep: openai</h2><div class="g grass">
+<figure><div class="s"><img src="sheep2-openai-walk1.svg" width="104" height="104"></div><figcaption>sheep2-openai-walk1 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-openai-walk1-l.svg" width="104" height="104"></div><figcaption>sheep2-openai-walk1-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-openai-walk2.svg" width="104" height="104"></div><figcaption>sheep2-openai-walk2 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-openai-walk2-l.svg" width="104" height="104"></div><figcaption>sheep2-openai-walk2-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-openai-walk3.svg" width="104" height="104"></div><figcaption>sheep2-openai-walk3 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-openai-walk3-l.svg" width="104" height="104"></div><figcaption>sheep2-openai-walk3-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-openai-walk4.svg" width="104" height="104"></div><figcaption>sheep2-openai-walk4 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-openai-walk4-l.svg" width="104" height="104"></div><figcaption>sheep2-openai-walk4-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-openai-graze1.svg" width="104" height="104"></div><figcaption>sheep2-openai-graze1 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-openai-graze1-l.svg" width="104" height="104"></div><figcaption>sheep2-openai-graze1-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-openai-graze2.svg" width="104" height="104"></div><figcaption>sheep2-openai-graze2 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-openai-graze2-l.svg" width="104" height="104"></div><figcaption>sheep2-openai-graze2-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-openai-sit.svg" width="104" height="104"></div><figcaption>sheep2-openai-sit <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-openai-sit-l.svg" width="104" height="104"></div><figcaption>sheep2-openai-sit-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-openai-sleep.svg" width="104" height="104"></div><figcaption>sheep2-openai-sleep <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-openai-sleep-l.svg" width="104" height="104"></div><figcaption>sheep2-openai-sleep-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-openai-alert.svg" width="104" height="104"></div><figcaption>sheep2-openai-alert <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-openai-alert-l.svg" width="104" height="104"></div><figcaption>sheep2-openai-alert-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-openai-stuck.svg" width="104" height="104"></div><figcaption>sheep2-openai-stuck <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-openai-stuck-l.svg" width="104" height="104"></div><figcaption>sheep2-openai-stuck-l <small>24x24</small></figcaption></figure>
+</div>
+<h2>Sheep: cursor</h2><div class="g grass">
+<figure><div class="s"><img src="sheep2-cursor-walk1.svg" width="104" height="104"></div><figcaption>sheep2-cursor-walk1 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-cursor-walk1-l.svg" width="104" height="104"></div><figcaption>sheep2-cursor-walk1-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-cursor-walk2.svg" width="104" height="104"></div><figcaption>sheep2-cursor-walk2 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-cursor-walk2-l.svg" width="104" height="104"></div><figcaption>sheep2-cursor-walk2-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-cursor-walk3.svg" width="104" height="104"></div><figcaption>sheep2-cursor-walk3 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-cursor-walk3-l.svg" width="104" height="104"></div><figcaption>sheep2-cursor-walk3-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-cursor-walk4.svg" width="104" height="104"></div><figcaption>sheep2-cursor-walk4 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-cursor-walk4-l.svg" width="104" height="104"></div><figcaption>sheep2-cursor-walk4-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-cursor-graze1.svg" width="104" height="104"></div><figcaption>sheep2-cursor-graze1 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-cursor-graze1-l.svg" width="104" height="104"></div><figcaption>sheep2-cursor-graze1-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-cursor-graze2.svg" width="104" height="104"></div><figcaption>sheep2-cursor-graze2 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-cursor-graze2-l.svg" width="104" height="104"></div><figcaption>sheep2-cursor-graze2-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-cursor-sit.svg" width="104" height="104"></div><figcaption>sheep2-cursor-sit <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-cursor-sit-l.svg" width="104" height="104"></div><figcaption>sheep2-cursor-sit-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-cursor-sleep.svg" width="104" height="104"></div><figcaption>sheep2-cursor-sleep <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-cursor-sleep-l.svg" width="104" height="104"></div><figcaption>sheep2-cursor-sleep-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-cursor-alert.svg" width="104" height="104"></div><figcaption>sheep2-cursor-alert <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-cursor-alert-l.svg" width="104" height="104"></div><figcaption>sheep2-cursor-alert-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-cursor-stuck.svg" width="104" height="104"></div><figcaption>sheep2-cursor-stuck <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-cursor-stuck-l.svg" width="104" height="104"></div><figcaption>sheep2-cursor-stuck-l <small>24x24</small></figcaption></figure>
+</div>
+<h2>Sheep: github</h2><div class="g grass">
+<figure><div class="s"><img src="sheep2-github-walk1.svg" width="104" height="104"></div><figcaption>sheep2-github-walk1 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-github-walk1-l.svg" width="104" height="104"></div><figcaption>sheep2-github-walk1-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-github-walk2.svg" width="104" height="104"></div><figcaption>sheep2-github-walk2 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-github-walk2-l.svg" width="104" height="104"></div><figcaption>sheep2-github-walk2-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-github-walk3.svg" width="104" height="104"></div><figcaption>sheep2-github-walk3 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-github-walk3-l.svg" width="104" height="104"></div><figcaption>sheep2-github-walk3-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-github-walk4.svg" width="104" height="104"></div><figcaption>sheep2-github-walk4 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-github-walk4-l.svg" width="104" height="104"></div><figcaption>sheep2-github-walk4-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-github-graze1.svg" width="104" height="104"></div><figcaption>sheep2-github-graze1 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-github-graze1-l.svg" width="104" height="104"></div><figcaption>sheep2-github-graze1-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-github-graze2.svg" width="104" height="104"></div><figcaption>sheep2-github-graze2 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-github-graze2-l.svg" width="104" height="104"></div><figcaption>sheep2-github-graze2-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-github-sit.svg" width="104" height="104"></div><figcaption>sheep2-github-sit <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-github-sit-l.svg" width="104" height="104"></div><figcaption>sheep2-github-sit-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-github-sleep.svg" width="104" height="104"></div><figcaption>sheep2-github-sleep <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-github-sleep-l.svg" width="104" height="104"></div><figcaption>sheep2-github-sleep-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-github-alert.svg" width="104" height="104"></div><figcaption>sheep2-github-alert <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-github-alert-l.svg" width="104" height="104"></div><figcaption>sheep2-github-alert-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-github-stuck.svg" width="104" height="104"></div><figcaption>sheep2-github-stuck <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-github-stuck-l.svg" width="104" height="104"></div><figcaption>sheep2-github-stuck-l <small>24x24</small></figcaption></figure>
+</div>
+<h2>Sheep: google</h2><div class="g grass">
+<figure><div class="s"><img src="sheep2-google-walk1.svg" width="104" height="104"></div><figcaption>sheep2-google-walk1 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-google-walk1-l.svg" width="104" height="104"></div><figcaption>sheep2-google-walk1-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-google-walk2.svg" width="104" height="104"></div><figcaption>sheep2-google-walk2 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-google-walk2-l.svg" width="104" height="104"></div><figcaption>sheep2-google-walk2-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-google-walk3.svg" width="104" height="104"></div><figcaption>sheep2-google-walk3 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-google-walk3-l.svg" width="104" height="104"></div><figcaption>sheep2-google-walk3-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-google-walk4.svg" width="104" height="104"></div><figcaption>sheep2-google-walk4 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-google-walk4-l.svg" width="104" height="104"></div><figcaption>sheep2-google-walk4-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-google-graze1.svg" width="104" height="104"></div><figcaption>sheep2-google-graze1 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-google-graze1-l.svg" width="104" height="104"></div><figcaption>sheep2-google-graze1-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-google-graze2.svg" width="104" height="104"></div><figcaption>sheep2-google-graze2 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-google-graze2-l.svg" width="104" height="104"></div><figcaption>sheep2-google-graze2-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-google-sit.svg" width="104" height="104"></div><figcaption>sheep2-google-sit <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-google-sit-l.svg" width="104" height="104"></div><figcaption>sheep2-google-sit-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-google-sleep.svg" width="104" height="104"></div><figcaption>sheep2-google-sleep <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-google-sleep-l.svg" width="104" height="104"></div><figcaption>sheep2-google-sleep-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-google-alert.svg" width="104" height="104"></div><figcaption>sheep2-google-alert <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-google-alert-l.svg" width="104" height="104"></div><figcaption>sheep2-google-alert-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-google-stuck.svg" width="104" height="104"></div><figcaption>sheep2-google-stuck <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-google-stuck-l.svg" width="104" height="104"></div><figcaption>sheep2-google-stuck-l <small>24x24</small></figcaption></figure>
+</div>
+<h2>Sheep: other</h2><div class="g grass">
+<figure><div class="s"><img src="sheep2-other-walk1.svg" width="104" height="104"></div><figcaption>sheep2-other-walk1 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-other-walk1-l.svg" width="104" height="104"></div><figcaption>sheep2-other-walk1-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-other-walk2.svg" width="104" height="104"></div><figcaption>sheep2-other-walk2 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-other-walk2-l.svg" width="104" height="104"></div><figcaption>sheep2-other-walk2-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-other-walk3.svg" width="104" height="104"></div><figcaption>sheep2-other-walk3 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-other-walk3-l.svg" width="104" height="104"></div><figcaption>sheep2-other-walk3-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-other-walk4.svg" width="104" height="104"></div><figcaption>sheep2-other-walk4 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-other-walk4-l.svg" width="104" height="104"></div><figcaption>sheep2-other-walk4-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-other-graze1.svg" width="104" height="104"></div><figcaption>sheep2-other-graze1 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-other-graze1-l.svg" width="104" height="104"></div><figcaption>sheep2-other-graze1-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-other-graze2.svg" width="104" height="104"></div><figcaption>sheep2-other-graze2 <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-other-graze2-l.svg" width="104" height="104"></div><figcaption>sheep2-other-graze2-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-other-sit.svg" width="104" height="104"></div><figcaption>sheep2-other-sit <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-other-sit-l.svg" width="104" height="104"></div><figcaption>sheep2-other-sit-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-other-sleep.svg" width="104" height="104"></div><figcaption>sheep2-other-sleep <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-other-sleep-l.svg" width="104" height="104"></div><figcaption>sheep2-other-sleep-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-other-alert.svg" width="104" height="104"></div><figcaption>sheep2-other-alert <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-other-alert-l.svg" width="104" height="104"></div><figcaption>sheep2-other-alert-l <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-other-stuck.svg" width="104" height="104"></div><figcaption>sheep2-other-stuck <small>24x24</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-other-stuck-l.svg" width="104" height="104"></div><figcaption>sheep2-other-stuck-l <small>24x24</small></figcaption></figure>
+</div>
+<h2>Lamb</h2><div class="g grass">
+<figure><div class="s"><img src="sheep2-lamb-walk1.svg" width="72" height="72"></div><figcaption>sheep2-lamb-walk1 <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-lamb-walk1-l.svg" width="72" height="72"></div><figcaption>sheep2-lamb-walk1-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-lamb-walk2.svg" width="72" height="72"></div><figcaption>sheep2-lamb-walk2 <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep2-lamb-walk2-l.svg" width="72" height="72"></div><figcaption>sheep2-lamb-walk2-l <small>16x16</small></figcaption></figure>
+</div>
+<h2>Drover: anthropic</h2><div class="g grass">
+<figure><div class="s"><img src="drover2-anthropic-idle1.svg" width="104" height="136"></div><figcaption>drover2-anthropic-idle1 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-idle1-l.svg" width="104" height="136"></div><figcaption>drover2-anthropic-idle1-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-idle2.svg" width="104" height="136"></div><figcaption>drover2-anthropic-idle2 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-idle2-l.svg" width="104" height="136"></div><figcaption>drover2-anthropic-idle2-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-walk1.svg" width="104" height="136"></div><figcaption>drover2-anthropic-walk1 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-walk1-l.svg" width="104" height="136"></div><figcaption>drover2-anthropic-walk1-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-walk2.svg" width="104" height="136"></div><figcaption>drover2-anthropic-walk2 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-walk2-l.svg" width="104" height="136"></div><figcaption>drover2-anthropic-walk2-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-walk3.svg" width="104" height="136"></div><figcaption>drover2-anthropic-walk3 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-walk3-l.svg" width="104" height="136"></div><figcaption>drover2-anthropic-walk3-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-walk4.svg" width="104" height="136"></div><figcaption>drover2-anthropic-walk4 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-walk4-l.svg" width="104" height="136"></div><figcaption>drover2-anthropic-walk4-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-read.svg" width="104" height="136"></div><figcaption>drover2-anthropic-read <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-read-l.svg" width="104" height="136"></div><figcaption>drover2-anthropic-read-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-think.svg" width="104" height="136"></div><figcaption>drover2-anthropic-think <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-think-l.svg" width="104" height="136"></div><figcaption>drover2-anthropic-think-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-lean.svg" width="104" height="136"></div><figcaption>drover2-anthropic-lean <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-lean-l.svg" width="104" height="136"></div><figcaption>drover2-anthropic-lean-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-doze.svg" width="104" height="136"></div><figcaption>drover2-anthropic-doze <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-doze-l.svg" width="104" height="136"></div><figcaption>drover2-anthropic-doze-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-whistle.svg" width="104" height="136"></div><figcaption>drover2-anthropic-whistle <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-anthropic-whistle-l.svg" width="104" height="136"></div><figcaption>drover2-anthropic-whistle-l <small>24x32</small></figcaption></figure>
+</div>
+<h2>Drover: openai</h2><div class="g grass">
+<figure><div class="s"><img src="drover2-openai-idle1.svg" width="104" height="136"></div><figcaption>drover2-openai-idle1 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-idle1-l.svg" width="104" height="136"></div><figcaption>drover2-openai-idle1-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-idle2.svg" width="104" height="136"></div><figcaption>drover2-openai-idle2 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-idle2-l.svg" width="104" height="136"></div><figcaption>drover2-openai-idle2-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-walk1.svg" width="104" height="136"></div><figcaption>drover2-openai-walk1 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-walk1-l.svg" width="104" height="136"></div><figcaption>drover2-openai-walk1-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-walk2.svg" width="104" height="136"></div><figcaption>drover2-openai-walk2 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-walk2-l.svg" width="104" height="136"></div><figcaption>drover2-openai-walk2-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-walk3.svg" width="104" height="136"></div><figcaption>drover2-openai-walk3 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-walk3-l.svg" width="104" height="136"></div><figcaption>drover2-openai-walk3-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-walk4.svg" width="104" height="136"></div><figcaption>drover2-openai-walk4 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-walk4-l.svg" width="104" height="136"></div><figcaption>drover2-openai-walk4-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-read.svg" width="104" height="136"></div><figcaption>drover2-openai-read <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-read-l.svg" width="104" height="136"></div><figcaption>drover2-openai-read-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-think.svg" width="104" height="136"></div><figcaption>drover2-openai-think <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-think-l.svg" width="104" height="136"></div><figcaption>drover2-openai-think-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-lean.svg" width="104" height="136"></div><figcaption>drover2-openai-lean <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-lean-l.svg" width="104" height="136"></div><figcaption>drover2-openai-lean-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-doze.svg" width="104" height="136"></div><figcaption>drover2-openai-doze <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-doze-l.svg" width="104" height="136"></div><figcaption>drover2-openai-doze-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-whistle.svg" width="104" height="136"></div><figcaption>drover2-openai-whistle <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-openai-whistle-l.svg" width="104" height="136"></div><figcaption>drover2-openai-whistle-l <small>24x32</small></figcaption></figure>
+</div>
+<h2>Drover: cursor</h2><div class="g grass">
+<figure><div class="s"><img src="drover2-cursor-idle1.svg" width="104" height="136"></div><figcaption>drover2-cursor-idle1 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-idle1-l.svg" width="104" height="136"></div><figcaption>drover2-cursor-idle1-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-idle2.svg" width="104" height="136"></div><figcaption>drover2-cursor-idle2 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-idle2-l.svg" width="104" height="136"></div><figcaption>drover2-cursor-idle2-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-walk1.svg" width="104" height="136"></div><figcaption>drover2-cursor-walk1 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-walk1-l.svg" width="104" height="136"></div><figcaption>drover2-cursor-walk1-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-walk2.svg" width="104" height="136"></div><figcaption>drover2-cursor-walk2 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-walk2-l.svg" width="104" height="136"></div><figcaption>drover2-cursor-walk2-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-walk3.svg" width="104" height="136"></div><figcaption>drover2-cursor-walk3 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-walk3-l.svg" width="104" height="136"></div><figcaption>drover2-cursor-walk3-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-walk4.svg" width="104" height="136"></div><figcaption>drover2-cursor-walk4 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-walk4-l.svg" width="104" height="136"></div><figcaption>drover2-cursor-walk4-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-read.svg" width="104" height="136"></div><figcaption>drover2-cursor-read <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-read-l.svg" width="104" height="136"></div><figcaption>drover2-cursor-read-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-think.svg" width="104" height="136"></div><figcaption>drover2-cursor-think <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-think-l.svg" width="104" height="136"></div><figcaption>drover2-cursor-think-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-lean.svg" width="104" height="136"></div><figcaption>drover2-cursor-lean <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-lean-l.svg" width="104" height="136"></div><figcaption>drover2-cursor-lean-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-doze.svg" width="104" height="136"></div><figcaption>drover2-cursor-doze <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-doze-l.svg" width="104" height="136"></div><figcaption>drover2-cursor-doze-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-whistle.svg" width="104" height="136"></div><figcaption>drover2-cursor-whistle <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-cursor-whistle-l.svg" width="104" height="136"></div><figcaption>drover2-cursor-whistle-l <small>24x32</small></figcaption></figure>
+</div>
+<h2>Drover: github</h2><div class="g grass">
+<figure><div class="s"><img src="drover2-github-idle1.svg" width="104" height="136"></div><figcaption>drover2-github-idle1 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-idle1-l.svg" width="104" height="136"></div><figcaption>drover2-github-idle1-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-idle2.svg" width="104" height="136"></div><figcaption>drover2-github-idle2 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-idle2-l.svg" width="104" height="136"></div><figcaption>drover2-github-idle2-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-walk1.svg" width="104" height="136"></div><figcaption>drover2-github-walk1 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-walk1-l.svg" width="104" height="136"></div><figcaption>drover2-github-walk1-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-walk2.svg" width="104" height="136"></div><figcaption>drover2-github-walk2 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-walk2-l.svg" width="104" height="136"></div><figcaption>drover2-github-walk2-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-walk3.svg" width="104" height="136"></div><figcaption>drover2-github-walk3 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-walk3-l.svg" width="104" height="136"></div><figcaption>drover2-github-walk3-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-walk4.svg" width="104" height="136"></div><figcaption>drover2-github-walk4 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-walk4-l.svg" width="104" height="136"></div><figcaption>drover2-github-walk4-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-read.svg" width="104" height="136"></div><figcaption>drover2-github-read <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-read-l.svg" width="104" height="136"></div><figcaption>drover2-github-read-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-think.svg" width="104" height="136"></div><figcaption>drover2-github-think <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-think-l.svg" width="104" height="136"></div><figcaption>drover2-github-think-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-lean.svg" width="104" height="136"></div><figcaption>drover2-github-lean <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-lean-l.svg" width="104" height="136"></div><figcaption>drover2-github-lean-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-doze.svg" width="104" height="136"></div><figcaption>drover2-github-doze <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-doze-l.svg" width="104" height="136"></div><figcaption>drover2-github-doze-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-whistle.svg" width="104" height="136"></div><figcaption>drover2-github-whistle <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-github-whistle-l.svg" width="104" height="136"></div><figcaption>drover2-github-whistle-l <small>24x32</small></figcaption></figure>
+</div>
+<h2>Drover: google</h2><div class="g grass">
+<figure><div class="s"><img src="drover2-google-idle1.svg" width="104" height="136"></div><figcaption>drover2-google-idle1 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-idle1-l.svg" width="104" height="136"></div><figcaption>drover2-google-idle1-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-idle2.svg" width="104" height="136"></div><figcaption>drover2-google-idle2 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-idle2-l.svg" width="104" height="136"></div><figcaption>drover2-google-idle2-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-walk1.svg" width="104" height="136"></div><figcaption>drover2-google-walk1 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-walk1-l.svg" width="104" height="136"></div><figcaption>drover2-google-walk1-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-walk2.svg" width="104" height="136"></div><figcaption>drover2-google-walk2 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-walk2-l.svg" width="104" height="136"></div><figcaption>drover2-google-walk2-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-walk3.svg" width="104" height="136"></div><figcaption>drover2-google-walk3 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-walk3-l.svg" width="104" height="136"></div><figcaption>drover2-google-walk3-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-walk4.svg" width="104" height="136"></div><figcaption>drover2-google-walk4 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-walk4-l.svg" width="104" height="136"></div><figcaption>drover2-google-walk4-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-read.svg" width="104" height="136"></div><figcaption>drover2-google-read <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-read-l.svg" width="104" height="136"></div><figcaption>drover2-google-read-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-think.svg" width="104" height="136"></div><figcaption>drover2-google-think <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-think-l.svg" width="104" height="136"></div><figcaption>drover2-google-think-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-lean.svg" width="104" height="136"></div><figcaption>drover2-google-lean <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-lean-l.svg" width="104" height="136"></div><figcaption>drover2-google-lean-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-doze.svg" width="104" height="136"></div><figcaption>drover2-google-doze <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-doze-l.svg" width="104" height="136"></div><figcaption>drover2-google-doze-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-whistle.svg" width="104" height="136"></div><figcaption>drover2-google-whistle <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-google-whistle-l.svg" width="104" height="136"></div><figcaption>drover2-google-whistle-l <small>24x32</small></figcaption></figure>
+</div>
+<h2>Drover: other</h2><div class="g grass">
+<figure><div class="s"><img src="drover2-other-idle1.svg" width="104" height="136"></div><figcaption>drover2-other-idle1 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-idle1-l.svg" width="104" height="136"></div><figcaption>drover2-other-idle1-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-idle2.svg" width="104" height="136"></div><figcaption>drover2-other-idle2 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-idle2-l.svg" width="104" height="136"></div><figcaption>drover2-other-idle2-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-walk1.svg" width="104" height="136"></div><figcaption>drover2-other-walk1 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-walk1-l.svg" width="104" height="136"></div><figcaption>drover2-other-walk1-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-walk2.svg" width="104" height="136"></div><figcaption>drover2-other-walk2 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-walk2-l.svg" width="104" height="136"></div><figcaption>drover2-other-walk2-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-walk3.svg" width="104" height="136"></div><figcaption>drover2-other-walk3 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-walk3-l.svg" width="104" height="136"></div><figcaption>drover2-other-walk3-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-walk4.svg" width="104" height="136"></div><figcaption>drover2-other-walk4 <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-walk4-l.svg" width="104" height="136"></div><figcaption>drover2-other-walk4-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-read.svg" width="104" height="136"></div><figcaption>drover2-other-read <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-read-l.svg" width="104" height="136"></div><figcaption>drover2-other-read-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-think.svg" width="104" height="136"></div><figcaption>drover2-other-think <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-think-l.svg" width="104" height="136"></div><figcaption>drover2-other-think-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-lean.svg" width="104" height="136"></div><figcaption>drover2-other-lean <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-lean-l.svg" width="104" height="136"></div><figcaption>drover2-other-lean-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-doze.svg" width="104" height="136"></div><figcaption>drover2-other-doze <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-doze-l.svg" width="104" height="136"></div><figcaption>drover2-other-doze-l <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-whistle.svg" width="104" height="136"></div><figcaption>drover2-other-whistle <small>24x32</small></figcaption></figure>
+<figure><div class="s"><img src="drover2-other-whistle-l.svg" width="104" height="136"></div><figcaption>drover2-other-whistle-l <small>24x32</small></figcaption></figure>
+</div>
+<h2>Dog</h2><div class="g grass">
+<figure><div class="s"><img src="dog2-sit.svg" width="104" height="80"></div><figcaption>dog2-sit <small>24x18</small></figcaption></figure>
+<figure><div class="s"><img src="dog2-sit-l.svg" width="104" height="80"></div><figcaption>dog2-sit-l <small>24x18</small></figcaption></figure>
+<figure><div class="s"><img src="dog2-run1.svg" width="104" height="80"></div><figcaption>dog2-run1 <small>24x18</small></figcaption></figure>
+<figure><div class="s"><img src="dog2-run1-l.svg" width="104" height="80"></div><figcaption>dog2-run1-l <small>24x18</small></figcaption></figure>
+<figure><div class="s"><img src="dog2-run2.svg" width="104" height="80"></div><figcaption>dog2-run2 <small>24x18</small></figcaption></figure>
+<figure><div class="s"><img src="dog2-run2-l.svg" width="104" height="80"></div><figcaption>dog2-run2-l <small>24x18</small></figcaption></figure>
+<figure><div class="s"><img src="dog2-run3.svg" width="104" height="80"></div><figcaption>dog2-run3 <small>24x18</small></figcaption></figure>
+<figure><div class="s"><img src="dog2-run3-l.svg" width="104" height="80"></div><figcaption>dog2-run3-l <small>24x18</small></figcaption></figure>
+<figure><div class="s"><img src="dog2-run4.svg" width="104" height="80"></div><figcaption>dog2-run4 <small>24x18</small></figcaption></figure>
+<figure><div class="s"><img src="dog2-run4-l.svg" width="104" height="80"></div><figcaption>dog2-run4-l <small>24x18</small></figcaption></figure>
+<figure><div class="s"><img src="dog2-bark.svg" width="104" height="80"></div><figcaption>dog2-bark <small>24x18</small></figcaption></figure>
+<figure><div class="s"><img src="dog2-bark-l.svg" width="104" height="80"></div><figcaption>dog2-bark-l <small>24x18</small></figcaption></figure>
+<figure><div class="s"><img src="dog2-wag1.svg" width="104" height="80"></div><figcaption>dog2-wag1 <small>24x18</small></figcaption></figure>
+<figure><div class="s"><img src="dog2-wag1-l.svg" width="104" height="80"></div><figcaption>dog2-wag1-l <small>24x18</small></figcaption></figure>
+<figure><div class="s"><img src="dog2-wag2.svg" width="104" height="80"></div><figcaption>dog2-wag2 <small>24x18</small></figcaption></figure>
+<figure><div class="s"><img src="dog2-wag2-l.svg" width="104" height="80"></div><figcaption>dog2-wag2-l <small>24x18</small></figcaption></figure>
+</div>
+<h2>Owl</h2><div class="g grass">
+<figure><div class="s"><img src="owl-fly1.svg" width="72" height="72"></div><figcaption>owl-fly1 <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="owl-fly1-l.svg" width="72" height="72"></div><figcaption>owl-fly1-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="owl-fly2.svg" width="72" height="72"></div><figcaption>owl-fly2 <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="owl-fly2-l.svg" width="72" height="72"></div><figcaption>owl-fly2-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="owl-fly3.svg" width="72" height="72"></div><figcaption>owl-fly3 <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="owl-fly3-l.svg" width="72" height="72"></div><figcaption>owl-fly3-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="owl-fly4.svg" width="72" height="72"></div><figcaption>owl-fly4 <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="owl-fly4-l.svg" width="72" height="72"></div><figcaption>owl-fly4-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="owl-perch.svg" width="72" height="72"></div><figcaption>owl-perch <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="owl-perch-l.svg" width="72" height="72"></div><figcaption>owl-perch-l <small>16x16</small></figcaption></figure>
+</div>
+<h2>Scenery</h2><div class="g grass">
+<figure><div class="s"><img src="path-h.svg" width="72" height="72"></div><figcaption>path-h <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="path-v.svg" width="72" height="72"></div><figcaption>path-v <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="path-ne.svg" width="72" height="72"></div><figcaption>path-ne <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="path-nw.svg" width="72" height="72"></div><figcaption>path-nw <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="path-se.svg" width="72" height="72"></div><figcaption>path-se <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="path-sw.svg" width="72" height="72"></div><figcaption>path-sw <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="fence2-h.svg" width="72" height="72"></div><figcaption>fence2-h <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="fence2-v.svg" width="72" height="72"></div><figcaption>fence2-v <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="fence2-post.svg" width="72" height="72"></div><figcaption>fence2-post <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="gate2-open.svg" width="72" height="72"></div><figcaption>gate2-open <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="gate2-closed.svg" width="72" height="72"></div><figcaption>gate2-closed <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="tree.svg" width="136" height="168"></div><figcaption>tree <small>32x40</small></figcaption></figure>
+<figure><div class="s"><img src="bush.svg" width="72" height="56"></div><figcaption>bush <small>16x12</small></figcaption></figure>
+<figure><div class="s"><img src="pond.svg" width="200" height="104"></div><figcaption>pond <small>48x24</small></figcaption></figure>
+<figure><div class="s"><img src="rock.svg" width="56" height="40"></div><figcaption>rock <small>12x8</small></figcaption></figure>
+<figure><div class="s"><img src="barn2-closed.svg" width="264" height="232"></div><figcaption>barn2-closed <small>64x56</small></figcaption></figure>
+<figure><div class="s"><img src="barn2-open.svg" width="264" height="232"></div><figcaption>barn2-open <small>64x56</small></figcaption></figure>
+<figure><div class="s"><img src="barn2-window-lit.svg" width="40" height="40"></div><figcaption>barn2-window-lit <small>8x8</small></figcaption></figure>
+<figure><div class="s"><img src="hay.svg" width="56" height="48"></div><figcaption>hay <small>12x10</small></figcaption></figure>
+<figure><div class="s"><img src="smoke1.svg" width="40" height="56"></div><figcaption>smoke1 <small>8x12</small></figcaption></figure>
+<figure><div class="s"><img src="smoke2.svg" width="40" height="56"></div><figcaption>smoke2 <small>8x12</small></figcaption></figure>
+<figure><div class="s"><img src="smoke3.svg" width="40" height="56"></div><figcaption>smoke3 <small>8x12</small></figcaption></figure>
+</div>
+<h2>Hills</h2><div class="g sky">
+<figure><div class="s"><img src="hills.svg" width="1032" height="168"></div><figcaption>hills <small>256x40</small></figcaption></figure>
+</div>
+<h2>Sky</h2><div class="g sky">
+<figure><div class="s"><img src="sun.svg" width="72" height="72"></div><figcaption>sun <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="moon.svg" width="72" height="72"></div><figcaption>moon <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="star.svg" width="24" height="24"></div><figcaption>star <small>4x4</small></figcaption></figure>
+<figure><div class="s"><img src="cloud.svg" width="72" height="72"></div><figcaption>cloud <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="cloud-dark.svg" width="72" height="72"></div><figcaption>cloud-dark <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="rain1.svg" width="72" height="72"></div><figcaption>rain1 <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="rain2.svg" width="72" height="72"></div><figcaption>rain2 <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="rainbow.svg" width="264" height="136"></div><figcaption>rainbow <small>64x32</small></figcaption></figure>
+</div>
+<h2>FX</h2><div class="g grass">
+<figure><div class="s"><img src="heart.svg" width="40" height="40"></div><figcaption>heart <small>8x8</small></figcaption></figure>
+<figure><div class="s"><img src="confetti1.svg" width="40" height="40"></div><figcaption>confetti1 <small>8x8</small></figcaption></figure>
+<figure><div class="s"><img src="confetti2.svg" width="40" height="40"></div><figcaption>confetti2 <small>8x8</small></figcaption></figure>
+<figure><div class="s"><img src="sparkle1.svg" width="40" height="40"></div><figcaption>sparkle1 <small>8x8</small></figcaption></figure>
+<figure><div class="s"><img src="sparkle2.svg" width="40" height="40"></div><figcaption>sparkle2 <small>8x8</small></figcaption></figure>
+<figure><div class="s"><img src="note.svg" width="40" height="40"></div><figcaption>note <small>8x8</small></figcaption></figure>
+<figure><div class="s"><img src="bubble-alert.svg" width="40" height="40"></div><figcaption>bubble-alert <small>8x8</small></figcaption></figure>
+<figure><div class="s"><img src="zzz.svg" width="40" height="40"></div><figcaption>zzz <small>8x8</small></figcaption></figure>
+</div>
+<h2>v1 (kept until the mod stops using them)</h2><div class="g grass">
+<figure><div class="s"><img src="sheep-anthropic-walk1.svg" width="72" height="72"></div><figcaption>sheep-anthropic-walk1 <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-anthropic-walk1-l.svg" width="72" height="72"></div><figcaption>sheep-anthropic-walk1-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-anthropic-walk2.svg" width="72" height="72"></div><figcaption>sheep-anthropic-walk2 <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-anthropic-walk2-l.svg" width="72" height="72"></div><figcaption>sheep-anthropic-walk2-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-anthropic-sit.svg" width="72" height="72"></div><figcaption>sheep-anthropic-sit <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-anthropic-sit-l.svg" width="72" height="72"></div><figcaption>sheep-anthropic-sit-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-anthropic-sleep.svg" width="72" height="72"></div><figcaption>sheep-anthropic-sleep <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-anthropic-sleep-l.svg" width="72" height="72"></div><figcaption>sheep-anthropic-sleep-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-anthropic-graze.svg" width="72" height="72"></div><figcaption>sheep-anthropic-graze <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-anthropic-graze-l.svg" width="72" height="72"></div><figcaption>sheep-anthropic-graze-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-anthropic-alert.svg" width="72" height="72"></div><figcaption>sheep-anthropic-alert <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-anthropic-alert-l.svg" width="72" height="72"></div><figcaption>sheep-anthropic-alert-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-openai-walk1.svg" width="72" height="72"></div><figcaption>sheep-openai-walk1 <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-openai-walk1-l.svg" width="72" height="72"></div><figcaption>sheep-openai-walk1-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-openai-walk2.svg" width="72" height="72"></div><figcaption>sheep-openai-walk2 <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-openai-walk2-l.svg" width="72" height="72"></div><figcaption>sheep-openai-walk2-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-openai-sit.svg" width="72" height="72"></div><figcaption>sheep-openai-sit <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-openai-sit-l.svg" width="72" height="72"></div><figcaption>sheep-openai-sit-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-openai-sleep.svg" width="72" height="72"></div><figcaption>sheep-openai-sleep <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-openai-sleep-l.svg" width="72" height="72"></div><figcaption>sheep-openai-sleep-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-openai-graze.svg" width="72" height="72"></div><figcaption>sheep-openai-graze <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-openai-graze-l.svg" width="72" height="72"></div><figcaption>sheep-openai-graze-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-openai-alert.svg" width="72" height="72"></div><figcaption>sheep-openai-alert <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-openai-alert-l.svg" width="72" height="72"></div><figcaption>sheep-openai-alert-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-cursor-walk1.svg" width="72" height="72"></div><figcaption>sheep-cursor-walk1 <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-cursor-walk1-l.svg" width="72" height="72"></div><figcaption>sheep-cursor-walk1-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-cursor-walk2.svg" width="72" height="72"></div><figcaption>sheep-cursor-walk2 <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-cursor-walk2-l.svg" width="72" height="72"></div><figcaption>sheep-cursor-walk2-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-cursor-sit.svg" width="72" height="72"></div><figcaption>sheep-cursor-sit <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-cursor-sit-l.svg" width="72" height="72"></div><figcaption>sheep-cursor-sit-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-cursor-sleep.svg" width="72" height="72"></div><figcaption>sheep-cursor-sleep <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-cursor-sleep-l.svg" width="72" height="72"></div><figcaption>sheep-cursor-sleep-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-cursor-graze.svg" width="72" height="72"></div><figcaption>sheep-cursor-graze <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-cursor-graze-l.svg" width="72" height="72"></div><figcaption>sheep-cursor-graze-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-cursor-alert.svg" width="72" height="72"></div><figcaption>sheep-cursor-alert <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-cursor-alert-l.svg" width="72" height="72"></div><figcaption>sheep-cursor-alert-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-github-walk1.svg" width="72" height="72"></div><figcaption>sheep-github-walk1 <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-github-walk1-l.svg" width="72" height="72"></div><figcaption>sheep-github-walk1-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-github-walk2.svg" width="72" height="72"></div><figcaption>sheep-github-walk2 <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-github-walk2-l.svg" width="72" height="72"></div><figcaption>sheep-github-walk2-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-github-sit.svg" width="72" height="72"></div><figcaption>sheep-github-sit <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-github-sit-l.svg" width="72" height="72"></div><figcaption>sheep-github-sit-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-github-sleep.svg" width="72" height="72"></div><figcaption>sheep-github-sleep <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-github-sleep-l.svg" width="72" height="72"></div><figcaption>sheep-github-sleep-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-github-graze.svg" width="72" height="72"></div><figcaption>sheep-github-graze <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-github-graze-l.svg" width="72" height="72"></div><figcaption>sheep-github-graze-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-github-alert.svg" width="72" height="72"></div><figcaption>sheep-github-alert <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-github-alert-l.svg" width="72" height="72"></div><figcaption>sheep-github-alert-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-other-walk1.svg" width="72" height="72"></div><figcaption>sheep-other-walk1 <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-other-walk1-l.svg" width="72" height="72"></div><figcaption>sheep-other-walk1-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-other-walk2.svg" width="72" height="72"></div><figcaption>sheep-other-walk2 <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-other-walk2-l.svg" width="72" height="72"></div><figcaption>sheep-other-walk2-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-other-sit.svg" width="72" height="72"></div><figcaption>sheep-other-sit <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-other-sit-l.svg" width="72" height="72"></div><figcaption>sheep-other-sit-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-other-sleep.svg" width="72" height="72"></div><figcaption>sheep-other-sleep <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-other-sleep-l.svg" width="72" height="72"></div><figcaption>sheep-other-sleep-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-other-graze.svg" width="72" height="72"></div><figcaption>sheep-other-graze <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-other-graze-l.svg" width="72" height="72"></div><figcaption>sheep-other-graze-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-other-alert.svg" width="72" height="72"></div><figcaption>sheep-other-alert <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="sheep-other-alert-l.svg" width="72" height="72"></div><figcaption>sheep-other-alert-l <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="drover-1.svg" width="72" height="104"></div><figcaption>drover-1 <small>16x24</small></figcaption></figure>
+<figure><div class="s"><img src="dog-1.svg" width="72" height="56"></div><figcaption>dog-1 <small>16x12</small></figcaption></figure>
+<figure><div class="s"><img src="drover-2.svg" width="72" height="104"></div><figcaption>drover-2 <small>16x24</small></figcaption></figure>
+<figure><div class="s"><img src="dog-2.svg" width="72" height="56"></div><figcaption>dog-2 <small>16x12</small></figcaption></figure>
+<figure><div class="s"><img src="barn.svg" width="200" height="168"></div><figcaption>barn <small>48x40</small></figcaption></figure>
+<figure><div class="s"><img src="fence.svg" width="72" height="72"></div><figcaption>fence <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="gate-open.svg" width="72" height="72"></div><figcaption>gate-open <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="gate-closed.svg" width="72" height="72"></div><figcaption>gate-closed <small>16x16</small></figcaption></figure>
+<figure><div class="s"><img src="grass-1.svg" width="40" height="40"></div><figcaption>grass-1 <small>8x8</small></figcaption></figure>
+<figure><div class="s"><img src="grass-2.svg" width="40" height="40"></div><figcaption>grass-2 <small>8x8</small></figcaption></figure>
+<figure><div class="s"><img src="flower.svg" width="40" height="40"></div><figcaption>flower <small>8x8</small></figcaption></figure>
+<figure><div class="s"><img src="bubble-alert.svg" width="40" height="40"></div><figcaption>bubble-alert <small>8x8</small></figcaption></figure>
+<figure><div class="s"><img src="zzz.svg" width="40" height="40"></div><figcaption>zzz <small>8x8</small></figcaption></figure>
+</div>
+<div id="night"></div>
+<script>if(location.hash=='#night')document.body.classList.add('night')</script>
