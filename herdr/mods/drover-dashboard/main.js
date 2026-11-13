@@ -1539,9 +1539,10 @@ export default class MissionDashboard extends View {
     // Gate with the sheepdog (review): the gate opens for the scenes, else while sheep are there.
     const open = hs.gate.rev ?? zone.gate.length + zone.past.length > 0;
     kids.push(at(X(L.reviewGate[0]), Y(L.reviewGate[1]), spr(open ? "gate2-open" : "gate2-closed", 16, 16, sc)));
-    // Its reviewer tag shows only while a review runs; otherwise (mission done, reviewer gone) it just sits by the gate.
-    const rev = d.agents.filter((a) => a.role === "reviewer"), lastRev = rev[rev.length - 1];
-    const dogA = lastRev && lastRev.status !== "gone" && m?.state === "running" ? lastRev : null;
+    // Its reviewer tag (and wag) shows only while a task is in review; otherwise it just sits by the gate.
+    const inReview = new Set(d.tasks.filter((k) => k.state === "review").map((k) => k.id));
+    const rev = d.agents.filter((a) => a.role === "reviewer" && a.status !== "gone" && inReview.size);
+    const dogA = rev.filter((a) => inReview.has(a.task)).pop() || rev.pop() || null;
     const dg = hs.a.dog, dd = this.dim("dog"), dp = pt(dg?.at || L.dog), dmo = { duration: hs.move, easing: "linear" };
     actors.set("dog", { x: dp.x, y: dp.y, w: dd.w * sc, h: dd.h * sc });
     kids.push(this.clickable(v_flex().id("dog").absolute().left(dp.x).top(dp.y).items_center().gap(1).transition("left", dmo).transition("top", dmo)
