@@ -1522,23 +1522,30 @@ Printing the command in your final response does not submit a verdict:
   drover task verdict {tid} changes "<numbered list of concrete fixes>\""""
 
 
+UI_SAFETY = """Tab safety (the person's own tabs live in the same Herdr):
+- Save the tab id that YOUR herdr-app do tab.new printed and close only that id. Never close, rename or select tabs or spaces you did not create; never pick ids from herdr-app ls.
+- Never close terminals or panes that are not yours.
+- Use a unique tab name such as '<mod>-wip-<task id>'.
+- If the frame shows another tab (the person is looking elsewhere), take the shot again later rather than switching their view repeatedly.
+"""
+
 UI_WORKER = """
 If you change a Herdr mod (herdr/mods/...), look at it rendered before you report done:
 1. herdr-app check herdr/mods/<mod> must pass; check herdr-app status for mod errors. Read herdr-app --skill once.
 2. Herdr loads mods from ~/.config/herdr-app/mods/<mod>, a symlink to the MAIN checkout, not your worktree.
    Copy your mod folder to ~/.config/herdr-app/mods/<mod>-wip (mod.json title: "<Title> WIP") and open it:
-   herdr-app do tab.new --name <mod>-wip --mod <mod>-wip --props '<json props, e.g. demo data>'
+   herdr-app do tab.new --name <mod>-wip-<task id> --mod <mod>-wip --props '<json props, e.g. demo data>'
 3. Wait ~2s, run herdr-app shot <scratch dir>/shot.png and LOOK at the PNG; repeat after each change.
 4. Attach the PNG path in your done report. Then close the tab (herdr-app do tab.close --id <id> --confirmed true)
    and delete the -wip copy. Never use pointer/key automation on the person's display.
-"""
+""" + UI_SAFETY
 
 UI_REVIEWER = """
 This change touches a Herdr mod (herdr/mods/...). Screenshot it yourself: herdr-app check herdr/mods/<mod>, copy the
 branch's mod to ~/.config/herdr-app/mods/<mod>-wip, open it with herdr-app do tab.new --mod <mod>-wip (see herdr-app --skill),
-wait ~2s, herdr-app shot <scratch dir>/shot.png and look at it. Then close the tab and delete the -wip copy.
+wait ~2s, herdr-app shot <scratch dir>/shot.png and look at it. Then close your tab and delete the -wip copy.
 Reject UI work that was not seen rendered or that renders empty or broken; put your PNG path in the verdict.
-"""
+""" + UI_SAFETY
 
 
 def touches_mods(t):

@@ -911,6 +911,12 @@ class TaskQueueTests(unittest.TestCase):
             self.assertLess(msg.index("If you change a Herdr mod"), msg.index("When done:"))
             rev = self.d.reviewer_msg(base, {**t, "branch": "b"})
             self.assertIn("Reject UI work that was not seen rendered", rev)
+            for m in (msg, rev):
+                for sentence in ("close only that id", "never pick ids from herdr-app ls",
+                                 "Never close, rename or select tabs or spaces you did not create",
+                                 "Never close terminals or panes that are not yours",
+                                 "'<mod>-wip-<task id>'", "take the shot again later rather than switching"):
+                    self.assertIn(sentence, m)
         self.assertNotIn("Herdr mod", self.d.worker_msg("m1", plain, "drover/x"))
         self.assertNotIn("Herdr mod", self.d.reviewer_msg(base, {**plain, "branch": "b"}))
         self.assertIn("screenshot", self.d.COORDINATOR_BRIEF)
